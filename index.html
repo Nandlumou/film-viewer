@@ -140,6 +140,7 @@ const S = {
   bloom: 0, bloomThresh: 0.82, glare: 0, halation: 0, grain: 0.02,
   fps: 24, shutter: 180, aspect: 2.39, inRes: 1080,
   autoTrack: 0, orangeThresh: 25, lumaThresh: 45, smooth: 0.12, preset: 0,
+  tiltR: 0, tiltG: 0, tiltB: 0,
 };
 
 /* 胶片预设: [名称, ISO, γR, γG, γB, 解混矩阵9个系数(行主序)]
@@ -206,6 +207,7 @@ uniform sampler2D uVideo;
 uniform vec2 uC[4];                 // BL, BR, TL, TR —— 影格四角(纹理坐标)
 uniform vec2 uCropMin, uCropSize;
 uniform vec3 uBlack, uRef, uInvGamma, uGain;
+uniform vec3 uBaseTilt;             // 片基微调: 三通道各自补的密度偏移
 uniform float uCrosstalk, uCamGamma, uTrim;
 uniform mat3 uH;                    // 影格单应: 输出单位方块 → 相机纹理坐标
 uniform mat3 uMix;                  // 密度域解混矩阵(每款胶片由染料谱算出)
@@ -220,7 +222,7 @@ void main(){
   vec3 T   = (lin - uBlack) / max(uRef - uBlack, vec3(1e-4));
   T = max(T, vec3(1e-4));
 
-  vec3 d = max(-log2(T) / log2(10.0) - uTrim, 0.0);
+  vec3 d = max(-log2(T) / log2(10.0) - uTrim + uBaseTilt, 0.0);
 
   vec3 dd = uMix * d;
 
@@ -838,6 +840,7 @@ function render(now){
   u3v(P.color.u.uRef, refVec());
   u3(P.color.u.uInvGamma, 1/S.gR, 1/S.gG, 1/S.gB);
   u3v(P.color.u.uGain, gain);
+  u3(P.color.u.uBaseTilt, S.tiltR, S.tiltG, S.tiltB);
   u1(P.color.u.uCrosstalk, S.crosstalk);
   u1(P.color.u.uCamGamma, S.camGamma);
   u1(P.color.u.uTrim, 0);
@@ -1019,6 +1022,11 @@ window.addEventListener('drop', e => {
 });
 /* ?img=<url> 直接载入一张图片(便于测试或从网上取图) */
 (function(){
+  const tl = new URLSearchParams(location.search).get('tilt');
+  if (tl){
+    const a = tl.split(',').map(Number);
+    if (a.length === 3 && a.every(isFinite)){ S.tiltR = a[0]; S.tiltG = a[1]; S.tiltB = a[2]; }
+  }
   const u = new URLSearchParams(location.search).get('img');
   if (!u) return;
   fetch(u).then(r => r.blob())
@@ -1056,6 +1064,10 @@ const CTRL = [
   { g:'标定', t:'button', label:'② 标定空片头(片基)',     fn:calBase },
   { g:'标定', t:'button', label:'③ 遮住镜头标定黑电平',   fn:calBlack },
   { g:'标定', t:'button', label:'一键自动标定当前画面',   fn:calAuto },
+  { g:'标定', t:'button', label:'扫描件起点（按你的样片拟合）', fn:scanPreset },
+  { g:'标定', t:'range', id:'tiltR', label:'片基微调 R', min:-0.6, max:0.6, step:0.01 },
+  { g:'标定', t:'range', id:'tiltG', label:'片基微调 G', min:-0.6, max:0.6, step:0.01 },
+  { g:'标定', t:'range', id:'tiltB', label:'片基微调 B', min:-0.6, max:0.6, step:0.01 },
   { g:'标定', t:'button', label:'尝试锁定曝光/白平衡', fn:() => lockCamera().then(ok =>
       toast(ok ? '已请求锁定，部分机型不支持' : '该机型不支持锁定')) },
   { g:'标定', t:'button', label:'手电筒 (torch) 开/关', fn:toggleTorch },
@@ -1147,6 +1159,16 @@ const panel = $('#panel'), inputs = {}, valueSpans = {};
   panel.appendChild(bc);
 })();
 /* 套用胶片预设: γ 来自数据手册拟合值, 不是手调的 */
+/* 扫描件起点: 以一张"已正确处理"的样片为靶拟合出来的参数。
+   关键结论是"反相斜率要按 0.6 缩放" —— 扫描件不是线性透射率测量,
+   扫描软件自带色调曲线, 所以等效 γ 要比数据手册值平得多。 */
+function scanPreset(){
+  S.gR = 0.927; S.gG = 0.935; S.gB = 1.024;   // ≈ 数据手册 γ ÷ 0.601
+  S.tiltR = 0;  S.tiltG = 0.130; S.tiltB = 0.093;
+  S.exposure = 0.92; S.contrast = 0; S.saturation = 1.03;
+  syncUI();
+  toast('已套用扫描件起点，可继续微调');
+}
 function applyPreset(i){
   const p = FILM_PRESETS[i] || FILM_PRESETS[0];
   S.preset = i;
