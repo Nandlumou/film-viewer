@@ -134,12 +134,49 @@ const IFMT = FLOAT_RT ? gl.RGBA16F : gl.RGBA8;
 
 /* ============================ 参数状态 ============================ */
 const S = {
-  exposure: 0.0, gR: 1.45, gG: 1.50, gB: 1.60, crosstalk: 0.35, mask: 1.0,
+  exposure: 0.0, gR: 0.592, gG: 0.587, gB: 0.622, crosstalk: 0.35, mask: 1.0,
   camGamma: 2.2, saturation: 1.05, contrast: 0.18, whitePoint: 5.0, autoExp: 1,
   bloom: 0, bloomThresh: 0.82, glare: 0, halation: 0, grain: 0.02,
   fps: 24, shutter: 180, aspect: 2.39, inRes: 1080,
-  autoTrack: 0, orangeThresh: 25, lumaThresh: 45, smooth: 0.12,
+  autoTrack: 0, orangeThresh: 25, lumaThresh: 45, smooth: 0.12, preset: 0,
 };
+
+/* 胶片预设: [名称, ISO, γR, γG, γB]
+   γ 不是调出来的, 是从胶片数据手册的感光曲线拟合的(最陡线性段最小二乘),
+   数据源 spectral_film_lut 0.18.12 (MIT), 提取脚本见 tools/extract_presets.py。
+   第 0 条是所有通过物理体检的胶片的 γ 中位数, 即"不知道用什么片"时的兜底。 */
+const FILM_PRESETS = [
+  ['通用 C-41（默认）',0,0.592,0.587,0.622],
+  ['Agfa Vista 100',100,0.647,0.6682,0.7969],
+  ['Fuji C200',200,0.6175,0.6487,0.6656],
+  ['Fuji Natura 1600',1600,0.7069,0.7382,0.7832],
+  ['Fuji Pro 160C',160,0.6324,0.6251,0.6224],
+  ['Fuji Pro 160S',160,0.5474,0.5366,0.5437],
+  ['Fuji Pro 400H',400,0.5935,0.552,0.5226],
+  ['Fuji Superia Reala',100,0.6613,0.6586,0.6745],
+  ['Fuji Superia X-Tra 400',400,0.6118,0.6675,0.6975],
+  ['Kodak 5247',16,0.6235,0.7038,0.765],
+  ['Kodak 5247 II',100,0.5979,0.6876,0.6291],
+  ['Kodak 5247 II Alt',125,0.5379,0.5964,0.5842],
+  ['Kodak 5248',25,0.6359,0.6643,0.6893],
+  ['Kodak 5250',50,0.6358,0.6699,0.6292],
+  ['Kodak Aerocolor IV 2460 Low',125,0.5042,0.5595,0.5774],
+  ['Kodak EXR 100T 5248',100,0.5234,0.587,0.5792],
+  ['Kodak EXR 200T 5293',250,0.6008,0.6724,0.6617],
+  ['Kodak Ektar 100',100,0.5629,0.5575,0.6479],
+  ['Kodak Gold 200',200,0.5448,0.565,0.6175],
+  ['Kodak Portra 160',160,0.5319,0.5392,0.6134],
+  ['Kodak Portra 400',400,0.5516,0.5514,0.6384],
+  ['Kodak Portra 800',800,0.5155,0.5227,0.6115],
+  ['Kodak Portra 800 @3200',800,0.6839,0.7068,0.7843],
+  ['Kodak Ultramax 400',400,0.5116,0.537,0.5983],
+  ['Kodak Vericolor III',160,0.5918,0.6495,0.6827],
+  ['Kodak Verita 200D 5206',200,0.6201,0.4881,0.6039],
+  ['Kodak Vision 320T 5277',320,0.4524,0.518,0.5193],
+  ['Kodak Vision3 200T 5213',200,0.4756,0.5531,0.5329],
+  ['Kodak Vision3 500T 5219',500,0.475,0.5551,0.5393],
+  ['Kodak Vision3 50D 5203',50,0.4672,0.5501,0.5318]
+];
 
 /* ====== 合成负片测试模式 (?demo=1) —— 不接摄像头即可验证整条管线 ====== */
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -975,10 +1012,12 @@ const CTRL = [
   { g:'相机', t:'select', id:'inRes', label:'输入分辨率',
     opts:[[1080,'1080p（流畅，推荐）'],[2160,'4K（更清晰，更费电）']] },
   { g:'相机', t:'button', label:'切换摄像头（换镜头试试微距）', fn:switchCamera },
+  { g:'色彩', t:'select', id:'preset', label:'胶片预设', opts:
+    FILM_PRESETS.map((p, i) => [i, p[0] + (p[1] ? '  ISO ' + p[1] : '')]) },
   { g:'色彩', t:'range', id:'exposure', label:'曝光',   min:-2, max:2, step:0.01 },
-  { g:'色彩', t:'range', id:'gR', label:'γ R', min:0.5, max:3, step:0.01 },
-  { g:'色彩', t:'range', id:'gG', label:'γ G', min:0.5, max:3, step:0.01 },
-  { g:'色彩', t:'range', id:'gB', label:'γ B', min:0.5, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'gR', label:'γ R', min:0.3, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'gG', label:'γ G', min:0.3, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'gB', label:'γ B', min:0.3, max:3, step:0.01 },
   { g:'色彩', t:'range', id:'crosstalk', label:'串扰解混', min:0, max:1, step:0.01 },
   { g:'色彩', t:'range', id:'mask', label:'去色罩', min:0, max:1, step:0.01 },
   { g:'色彩', t:'range', id:'camGamma', label:'相机线性化', min:1, max:3, step:0.05 },
@@ -1001,7 +1040,7 @@ const CTRL = [
   { g:'跟踪', t:'button', label:'重置为整幅',
     fn:() => { track.corners = [[0,0],[1,0],[0,1],[1,1]]; track.bbox = null; } },
 ];
-const panel = $('#panel'), inputs = {};
+const panel = $('#panel'), inputs = {}, valueSpans = {};
 (function buildUI(){
   let lastG = '';
   for (const c of CTRL){
@@ -1027,6 +1066,7 @@ const panel = $('#panel'), inputs = {};
         S[c.id] = parseFloat(el.value);
         if (c.id === 'aspect') layout();
         else if (c.id === 'inRes') reapplyInput();
+        else if (c.id === 'preset') applyPreset(parseInt(el.value, 10));
       };
       row.appendChild(el);
     } else if (c.t === 'check'){
@@ -1039,6 +1079,7 @@ const panel = $('#panel'), inputs = {};
       const v = document.createElement('span'); v.className = 'val';
       v.textContent = (+S[c.id]).toFixed(2);
       el.oninput = () => { S[c.id] = parseFloat(el.value); v.textContent = (+el.value).toFixed(2); };
+      valueSpans[c.id] = v;
       row.appendChild(el); row.appendChild(v);
     }
     panel.appendChild(row); inputs[c.id] = el;
@@ -1053,11 +1094,20 @@ const panel = $('#panel'), inputs = {};
   bc.onclick = showCaps;
   panel.appendChild(bc);
 })();
+/* 套用胶片预设: γ 来自数据手册拟合值, 不是手调的 */
+function applyPreset(i){
+  const p = FILM_PRESETS[i] || FILM_PRESETS[0];
+  S.preset = i;
+  S.gR = p[2]; S.gG = p[3]; S.gB = p[4];
+  syncUI();
+  toast('预设：' + p[0] + (p[1] ? ' · ISO ' + p[1] : ''));
+}
 function syncUI(){
   for (const c of CTRL){
     const el = inputs[c.id]; if (!el) continue;
     if (c.t === 'check') el.checked = !!S[c.id];
     else if (c.t === 'range' || c.t === 'select') el.value = S[c.id];
+    if (c.t === 'range' && valueSpans[c.id]) valueSpans[c.id].textContent = (+S[c.id]).toFixed(2);
   }
 }
 function goFullscreen(){
@@ -1190,6 +1240,9 @@ function renderDemo(){
 }
 if (DEMO){
   renderDemo();
+  /* 合成负片是用 DEMO_GAMMA 生成的, 反相时必须用同一个 γ, 自检才对得上 */
+  S.gR = DEMO_GAMMA[0]; S.gG = DEMO_GAMMA[1]; S.gB = DEMO_GAMMA[2];
+  syncUI();
   CAL.black = [0, 0, 0];
   CAL.base = DEMO_BASE_LIN.slice();
   CAL.light = DEMO_BASE_LIN.slice();
