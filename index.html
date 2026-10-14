@@ -43,8 +43,10 @@
     background:rgba(14,14,16,.9); border:1px solid #262629; border-radius:10px;
     padding:6px; transition:opacity .2s; }
   #setup.dim{ opacity:.02; pointer-events:none; }
-  #cam{ width:100%; display:block; border-radius:6px; }
-  #roi{ position:absolute; left:6px; top:6px; width:calc(100% - 12px); touch-action:none; border-radius:6px; }
+  /* 取景窗: 视频与角点画布严格重叠; 高度由 JS 按视频比例算并限高, 手机上不会挡住主画面 */
+  #mini{ position:relative; margin:0 auto; overflow:hidden; border-radius:6px; background:#000; }
+  #cam{ position:absolute; left:0; top:0; width:100%; height:100%; object-fit:contain; }
+  #roi{ position:absolute; left:0; top:0; width:100%; height:100%; touch-action:none; }
   .hint{ color:var(--dim); font-size:10.5px; margin-top:5px; }
   #overlay{ position:fixed; inset:0; z-index:9; background:#0a0a0b; display:none;
     flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
@@ -73,8 +75,10 @@
 <button id="tab">参数</button>
 
 <div id="setup">
-  <video id="cam" playsinline muted autoplay></video>
-  <canvas id="roi"></canvas>
+  <div id="mini">
+    <video id="cam" playsinline muted autoplay></video>
+    <canvas id="roi"></canvas>
+  </div>
   <div class="hint">拖动四个角点框选底片区域（或开启自动跟踪）</div>
 </div>
 
@@ -132,8 +136,8 @@ const IFMT = FLOAT_RT ? gl.RGBA16F : gl.RGBA8;
 const S = {
   exposure: 0.0, gR: 1.45, gG: 1.50, gB: 1.60, crosstalk: 0.35, mask: 1.0,
   camGamma: 2.2, saturation: 1.05, contrast: 0.18, whitePoint: 5.0, autoExp: 1,
-  bloom: 0.55, bloomThresh: 1.0, glare: 0.02, halation: 0.25, grain: 0.025,
-  fps: 24, shutter: 180, aspect: 2.39,
+  bloom: 0.45, bloomThresh: 0.82, glare: 0.012, halation: 0.10, grain: 0.025,
+  fps: 24, shutter: 180, aspect: 2.39, inRes: 1080,
   autoTrack: 1, orangeThresh: 25, lumaThresh: 45, smooth: 0.12,
 };
 
@@ -182,7 +186,7 @@ void main(){
                  dot(vec3(-0.10*k,  -0.30*k,  1.0   ), d));
 
   vec3 E = pow(vec3(10.0), clamp(dd, 0.0, 6.0) * uInvGamma) * uGain;
-  outColor = vec4(min(E, vec3(1e4)), 1.0);
+  outColor = vec4(min(E, vec3(16.0)), 1.0);   // 夹住上限: 反相爆值时不会整屏发光
 }`;
 
 const FS_BLEND = `#version 300 es
@@ -201,12 +205,19 @@ const FS_THRESH = `#version 300 es
 precision highp float;
 in vec2 vUv;
 uniform sampler2D uSrc;
-uniform float uThresh;
+uniform float uThresh, uWP, uScale;
 out vec4 outColor;
+vec3 filmic(vec3 x){
+  const float A=0.15, B=0.50, C=0.10, D=0.20, E=0.02, F=0.30;
+  return ((x*(A*x + C*B) + D*E) / (x*(A*x + B) + D*F)) - E/F;
+}
 void main(){
   vec3 c = texture(uSrc, vUv).rgb;
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  float w = smoothstep(uThresh, uThresh * 1.8 + 0.05, l);
+  /* 判据用"成片里会不会接近纯白", 而不是绝对亮度值。
+     这样无论曝光/增益怎么变, 光晕都不会失控地铺满整屏。 */
+  float shown = filmic(vec3(l * uScale)).r / max(filmic(vec3(uWP)).r, 1e-3);
+  float w = smoothstep(uThresh, uThresh + 0.16, shown);
   outColor = vec4(c * w, 1.0);
 }`;
 
@@ -266,9 +277,9 @@ void main(){
   vec3 b2    = texture(uB2, vUv).rgb;
   vec3 glare = texture(uGlare, vUv).rgb;
 
-  vec3 bloom = b0 * 0.45 + b1 * 0.35 + b2 * 0.20;
-  vec3 hal   = b2 * vec3(1.0, 0.34, 0.16);          // halation: 片基背散射, 偏红
-  vec3 hdr = base + bloom * uBloom + hal * uHal + glare * uGlareAmt + vec3(0.0008);
+  vec3 bloom = min(b0 * 0.45 + b1 * 0.35 + b2 * 0.20, vec3(4.0));
+  vec3 hal   = min(b2, vec3(2.0)) * vec3(1.0, 0.45, 0.28);   // halation: 片基背散射, 偏红
+  vec3 hdr = base + bloom * uBloom + hal * uHal + min(glare, vec3(1.0)) * uGlareAmt + vec3(0.0008);
 
   float wp = filmic(vec3(uWP)).r;
   vec3 c = clamp(filmic(hdr * 1.6) / max(wp, 1e-3), 0.0, 1.0);
@@ -416,21 +427,46 @@ function downsample(srcTex, sw, sh, dst){
 }
 
 /* ============================ 相机 ============================ */
-let stream = null, running = false, torchOn = false, wl = null;
+let stream = null, running = false, torchOn = false, wl = null, camIdx = 0;
 const track = { corners: [[0,0],[1,0],[0,1],[1,1]], bbox: null, lost: 0 };
 
-async function startCamera(){
-  const v = { facingMode: { ideal: 'environment' },
-    width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30, max: 30 } };
-  stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+function resConstraint(){
+  return { width: { ideal: Math.round(S.inRes * 16 / 9) }, height: { ideal: S.inRes },
+           frameRate: { ideal: 30, max: 30 } };
+}
+async function openStream(constraints){
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: constraints });
   video.srcObject = stream;
   await video.play();
   await new Promise(r => { if (video.videoWidth) r(); else video.onloadedmetadata = r; });
   gl.bindTexture(gl.TEXTURE_2D, camTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   resizeEditor(); layout();
+  track.bbox = null;
+}
+async function startCamera(){
+  /* 竖屏时默认不裁切: 2.39 在竖屏只占约 1/4 屏高, 会显得又小又糊 */
+  if (window.innerHeight > window.innerWidth && +S.aspect !== 0){ S.aspect = 0; syncUI(); }
+  await openStream(Object.assign({ facingMode: { ideal: 'environment' } }, resConstraint()));
   running = true; lastDraw = 0;
   wakeLock();
+}
+/* 换镜头: iPhone 上常能枚举到超广角, 它的最近对焦距离更近, 拍底片有时更好用 */
+async function switchCamera(){
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    if (devs.length < 2){ toast('这台设备只暴露了一个摄像头'); return; }
+    camIdx = (camIdx + 1) % devs.length;
+    await openStream(Object.assign({ deviceId: { exact: devs[camIdx].deviceId } }, resConstraint()));
+    toast('已切换：' + (devs[camIdx].label || ('摄像头 ' + (camIdx + 1))));
+  } catch (e){ toast('切换失败：' + (e.message || e)); }
+}
+async function reapplyInput(){
+  const t = stream && stream.getVideoTracks()[0];
+  if (!t) return;
+  try { await t.applyConstraints(resConstraint()); toast('输入已切到 ' + S.inRes + 'p'); }
+  catch (e){ toast('该机型不支持在线切换，重新开启摄像头生效'); }
 }
 async function lockCamera(){
   const t = stream && stream.getVideoTracks()[0]; if (!t) return false;
@@ -494,6 +530,15 @@ function boxToCorners(b){
   const v1 = 1 - b.y0 / AH, v0 = 1 - (b.y1 + 1) / AH;
   return [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
 }
+/* 合理性检查: 挡住"锁到一大片背景/整幅画面"这类误判, 宁可退回手动取景 */
+function plausible(b){
+  const bw = (b.x1 - b.x0 + 1) / AW, bh = (b.y1 - b.y0 + 1) / AH;
+  const area = bw * bh;
+  const ar = (bw * srcW()) / Math.max(bh * srcH(), 1e-6);
+  if (area > 0.92 || area < 0.05) return false;
+  if (ar < 0.7 || ar > 2.4) return false;
+  return true;
+}
 function smoothTo(target){
   const k = Math.max(0.02, Math.min(0.9, S.smooth));
   for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++)
@@ -501,7 +546,7 @@ function smoothTo(target){
 }
 
 const CAL = { black: [0, 0, 0], base: null, light: null };
-let autoGain = 0.05, gainInit = false;
+let autoGain = 0.05, gainInit = false, lastMeanD = 0;
 function roiInC(x, y){
   const c = track.corners;
   const lo = Math.min(c[0][0], c[2][0]), hi = Math.max(c[1][0], c[3][0]);
@@ -580,6 +625,7 @@ function autoExposure(){
   const m = Math.pow(Math.max(g[0],1e-6) * Math.max(g[1],1e-6) * Math.max(g[2],1e-6), 1/3);
   autoGain = gainInit ? autoGain * 0.85 + m * 0.15 : m;
   gainInit = true;
+  lastMeanD = (dsum[0] + dsum[1] + dsum[2]) / (3 * n);   // 供 HUD 判断"是不是真在拍底片"
   return autoGain;
 }
 
@@ -608,10 +654,10 @@ function layout(){
   if (h > ah){ h = ah; w = h * cr.aspect; }
   canvas.style.width = Math.round(w) + 'px';
   canvas.style.height = Math.round(h) + 'px';
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  let resH = Math.min(Math.round(h * dpr), 900);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);   // 用满像素密度, 否则画面被放大而发虚
+  let resH = Math.min(Math.round(h * dpr), 1400);
   let resW = Math.round(resH * cr.aspect);
-  const maxPix = 1.8e6;          // 移动端显存上限(中间 FBO 为 RGBA16F)
+  const maxPix = 2.4e6;          // 移动端显存上限(中间 FBO 为 RGBA16F)
   if (resW * resH > maxPix){
     const k = Math.sqrt(maxPix / (resW * resH));
     resH = Math.round(resH * k); resW = Math.round(resW * k);
@@ -621,10 +667,16 @@ function layout(){
   buildFB(canvas.width, canvas.height);
 }
 function resizeEditor(){
-  const vw = srcW(), vh = srcH();
-  const w = 288;
-  roiCv.width = w; roiCv.height = Math.round(w * vh / vw);
-  roiCv.style.height = roiCv.height + 'px';
+  const vA = srcW() / srcH();
+  const avail = Math.max(120, setupBox.clientWidth - 12);
+  const maxH = Math.max(90, Math.round(window.innerHeight * 0.28));   // 手机上别把主画面遮住
+  let w = avail, h = w / vA;
+  if (h > maxH){ h = maxH; w = h * vA; }
+  mini.style.width = Math.round(w) + 'px';
+  mini.style.height = Math.round(h) + 'px';
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  roiCv.width = Math.round(w * dpr);
+  roiCv.height = Math.round(h * dpr);
 }
 
 /* ============================ 主循环 ============================ */
@@ -681,9 +733,10 @@ function render(now){
     const img = measure();
     if (S.autoTrack && img){
       const b = detect(img);
-      if (b){ track.bbox = b; track.lost = 0; } else track.lost++;
+      if (b && plausible(b)){ track.bbox = b; track.lost = 0; }
+      else { track.lost++; if (track.lost > 8) track.bbox = null; }
     }
-    if (S.autoExp) autoExposure();
+    autoExposure();            // 无论自动曝光是否开启都要估一次, 供 HUD 提示用
   }
   if (S.autoTrack && track.bbox) smoothTo(boxToCorners(track.bbox));
 
@@ -746,6 +799,8 @@ function render(now){
   use(L0.b);
   bindTex(0, src.t); ui(P.thresh.u.uSrc, 0);
   u1(P.thresh.u.uThresh, S.bloomThresh);
+  u1(P.thresh.u.uWP, S.whitePoint);
+  u1(P.thresh.u.uScale, 1.6);
   draw();
 
   const blooms = [ blurPair(L0.b.t, L0.w, L0.h, { a: L0.a, b: L0.b }, 1.0) ];
@@ -786,16 +841,19 @@ function render(now){
   if (now - fpsT > 500){ fpsShown = Math.round(fpsN * 1000 / (now - fpsT)); fpsT = now; fpsN = 0; }
   drawEditor();
   if (frameNo <= 1 || frameNo % 6 === 0){   // 首帧立即写一次, 之后每 6 帧重写(省 DOM 布局)
-    hud.innerHTML =
-      '目标 <b>' + S.fps + '</b>fps · 实测 <b>' + fpsShown + '</b> · ' + canvas.width + '×' + canvas.height +
+    let t = '目标 <b>' + S.fps + '</b>fps · 实测 <b>' + fpsShown + '</b> · ' +
+            canvas.width + '×' + canvas.height +
       (FLOAT_RT ? '' : '<br><span class="warn">无浮点渲染，高光/光晕受限</span>') +
       (S.autoTrack ? (track.bbox ? '<br>已锁定影格' : '<br><span class="warn">搜索影格中…</span>')
                    : '<br>手动取景');
+    if (running && lastMeanD > 1.7) t += '<br><span class="warn">画面偏暗：底片要对着背光/匀光板</span>';
+    if (window.innerHeight > window.innerWidth) t += '<br><span class="warn">横屏效果更好</span>';
+    hud.innerHTML = t;
   }
 }
 
 /* ============================ 取景编辑器 ============================ */
-const setupBox = $('#setup');
+const setupBox = $('#setup'), mini = $('#mini');
 function drawEditor(){
   if (setupBox.classList.contains('dim') || (!DEMO && !video.videoWidth)) return;
   const w = roiCv.width, h = roiCv.height;
@@ -848,6 +906,9 @@ const CTRL = [
   { g:'标定', t:'button', label:'尝试锁定曝光/白平衡', fn:() => lockCamera().then(ok =>
       toast(ok ? '已请求锁定，部分机型不支持' : '该机型不支持锁定')) },
   { g:'标定', t:'button', label:'手电筒 (torch) 开/关', fn:toggleTorch },
+  { g:'相机', t:'select', id:'inRes', label:'输入分辨率',
+    opts:[[1080,'1080p（流畅，推荐）'],[2160,'4K（更清晰，更费电）']] },
+  { g:'相机', t:'button', label:'切换摄像头（换镜头试试微距）', fn:switchCamera },
   { g:'色彩', t:'range', id:'exposure', label:'曝光',   min:-2, max:2, step:0.01 },
   { g:'色彩', t:'range', id:'gR', label:'γ R', min:0.5, max:3, step:0.01 },
   { g:'色彩', t:'range', id:'gG', label:'γ G', min:0.5, max:3, step:0.01 },
@@ -860,7 +921,7 @@ const CTRL = [
   { g:'色彩', t:'range', id:'whitePoint', label:'高光白点', min:1, max:16, step:0.1 },
   { g:'色彩', t:'check', id:'autoExp', label:'自动曝光' },
   { g:'光学', t:'range', id:'bloom', label:'高光溢出', min:0, max:2, step:0.01 },
-  { g:'光学', t:'range', id:'bloomThresh', label:'溢出阈值', min:0.3, max:4, step:0.05 },
+  { g:'光学', t:'range', id:'bloomThresh', label:'发光门槛', min:0.5, max:1, step:0.01 },
   { g:'光学', t:'range', id:'halation', label:'光晕 halation', min:0, max:1.5, step:0.01 },
   { g:'光学', t:'range', id:'glare', label:'veiling 散射', min:0, max:0.15, step:0.002 },
   { g:'光学', t:'range', id:'grain', label:'颗粒', min:0, max:0.12, step:0.002 },
@@ -897,7 +958,11 @@ const panel = $('#panel'), inputs = {};
       for (const o of c.opts){ const op = document.createElement('option');
         op.value = o[0]; op.textContent = o[1]; el.appendChild(op); }
       el.value = S[c.id];
-      el.onchange = () => { S[c.id] = parseFloat(el.value); if (c.id === 'aspect') layout(); };
+      el.onchange = () => {
+        S[c.id] = parseFloat(el.value);
+        if (c.id === 'aspect') layout();
+        else if (c.id === 'inRes') reapplyInput();
+      };
       row.appendChild(el);
     } else if (c.t === 'check'){
       el = document.createElement('input'); el.type = 'checkbox'; el.checked = !!S[c.id];
@@ -945,6 +1010,8 @@ const toastEl = $('#toast');
 /* 把"能不能跑"从猜测变成目标设备上的读数: 点一下, 列出全部关键能力 */
 function capReport(){
   const L = [], yn = (v) => (v ? '有' : '无');
+  L.push('页面版本       v0.2 · 2026-10-14');
+  L.push('');
   L.push('视口           ' + window.innerWidth + '×' + window.innerHeight +
          '   dpr=' + (window.devicePixelRatio || 1));
   L.push('安全上下文     ' + yn(window.isSecureContext) + '（无则摄像头不可用）');
