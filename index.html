@@ -81,6 +81,7 @@
   </div>
   <div class="hint">拖动四个角点框选底片区域（或开启自动跟踪）</div>
 </div>
+<input id="stillInput" type="file" accept="image/*" style="display:none">
 
 <div id="panel"></div>
 
@@ -179,9 +180,12 @@ const FILM_PRESETS = [
 /* ====== 合成负片测试模式 (?demo=1) —— 不接摄像头即可验证整条管线 ====== */
 const DEMO = new URLSearchParams(location.search).has('demo');
 let demoCv = null;
-const srcEl = () => (DEMO ? demoCv : video);
-const srcW  = () => (DEMO ? 720 : (video.videoWidth || 16));
-const srcH  = () => (DEMO ? 480 : (video.videoHeight || 9));
+let stillCv = null;                 // 载入的静态图片(扫描件/翻拍), 优先于摄像头
+const srcEl = () => (stillCv || (DEMO ? demoCv : video));
+const srcW  = () => (stillCv ? stillCv.width : (DEMO ? 720 : (video.videoWidth || 16)));
+const srcH  = () => (stillCv ? stillCv.height : (DEMO ? 480 : (video.videoHeight || 9)));
+/* 有没有可用的画面源: 静态图 / 合成测试图 / 正在出帧的相机 */
+const hasSource = () => !!stillCv || DEMO || !!video.videoWidth;
 const DEMO_BASE_LIN = [0.647, 0.249, 0.049];   // 橙色色罩的线性光值
 const DEMO_GAMMA = [1.45, 1.50, 1.60];         // 与默认 γ 一致 → 反相后应还原场景
 
@@ -473,6 +477,7 @@ function resConstraint(){
 }
 async function openStream(constraints){
   if (stream) stream.getTracks().forEach(t => t.stop());
+  stillCv = null;                   // 开摄像头就切回实时画面
   stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: constraints });
   video.srcObject = stream;
   await video.play();
@@ -533,7 +538,7 @@ const Actx = Acv.getContext('2d', { willReadFrequently: true });
 let Aimg = null;
 
 function measure(){
-  if (!DEMO && !video.videoWidth) return null;
+  if (!hasSource()) return null;
   Actx.drawImage(srcEl(), 0, 0, AW, AH);
   Aimg = Actx.getImageData(0, 0, AW, AH);
   return Aimg;
@@ -950,7 +955,7 @@ function render(now){
 /* ============================ 取景编辑器 ============================ */
 const setupBox = $('#setup'), mini = $('#mini');
 function drawEditor(){
-  if (setupBox.classList.contains('dim') || (!DEMO && !video.videoWidth)) return;
+  if (setupBox.classList.contains('dim') || !hasSource()) return;
   const w = roiCv.width, h = roiCv.height;
   const ctx = roiCv.getContext('2d');
   ctx.drawImage(srcEl(), 0, 0, w, h);
@@ -979,6 +984,47 @@ function autoFrame(){
   if (!(+S.aspect)){ frameAspect = 0; layout(); }   // 源片幅模式: 按新影格重新适配画布比例
   toast('已框选影格（可拖角点微调）');
 }
+/* 载入静态图片: 扫描件或翻拍照片走同一条管线, 不再只支持摄像头 */
+function loadStillFile(file){
+  if (!file) return;
+  if (!/^image\//.test(file.type)){ toast('这不是图片文件'); return; }
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => {
+    const maxW = 2400;                       // 限制处理宽度, 手机也扛得住
+    const k = Math.min(1, maxW / im.width);
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(im.width * k));
+    cv.height = Math.max(1, Math.round(im.height * k));
+    cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
+    stillCv = cv;
+    $('#overlay').classList.remove('show');      // 载入图片后关掉启动浮层
+    track.corners = [[0,0],[1,0],[0,1],[1,1]];
+    frameSet = false; frameAspect = 0;
+    resizeEditor(); layout();
+    running = true; lastDraw = 0;
+    calAuto();
+    URL.revokeObjectURL(url);
+    toast('已载入 ' + im.width + '×' + im.height + '，用「一键自动标定」再校一次更准');
+  };
+  im.onerror = () => { URL.revokeObjectURL(url); toast('这张图读不了'); };
+  im.src = url;
+}
+$('#stillInput').addEventListener('change', e => loadStillFile(e.target.files[0]));
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) loadStillFile(f);
+});
+/* ?img=<url> 直接载入一张图片(便于测试或从网上取图) */
+(function(){
+  const u = new URLSearchParams(location.search).get('img');
+  if (!u) return;
+  fetch(u).then(r => r.blob())
+    .then(b => loadStillFile(new File([b], 'still', { type: b.type || 'image/jpeg' })))
+    .catch(() => toast('载入失败：' + u));
+})();
 function ptFromEvent(e){
   const r = roiCv.getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
@@ -1016,6 +1062,8 @@ const CTRL = [
   { g:'相机', t:'select', id:'inRes', label:'输入分辨率',
     opts:[[1080,'1080p（流畅，推荐）'],[2160,'4K（更清晰，更费电）']] },
   { g:'相机', t:'button', label:'切换摄像头（换镜头试试微距）', fn:switchCamera },
+  { g:'相机', t:'button', label:'载入图片（扫描件 / 翻拍，也可直接拖进来）',
+    fn:() => $('#stillInput').click() },
   { g:'色彩', t:'select', id:'preset', label:'胶片预设', opts:
     FILM_PRESETS.map((p, i) => [i, p[0] + (p[1] ? '  ISO ' + p[1] : '')]) },
   { g:'色彩', t:'range', id:'exposure', label:'曝光',   min:-2, max:2, step:0.01 },
@@ -1129,7 +1177,7 @@ const toastEl = $('#toast');
 /* 把"能不能跑"从猜测变成目标设备上的读数: 点一下, 列出全部关键能力 */
 function capReport(){
   const L = [], yn = (v) => (v ? '有' : '无');
-  L.push('页面版本       v0.2 · 2026-10-14');
+  L.push('页面版本       v0.4 · 2026-10-14');
   L.push('');
   L.push('视口           ' + window.innerWidth + '×' + window.innerHeight +
          '   dpr=' + (window.devicePixelRatio || 1));
@@ -1137,6 +1185,10 @@ function capReport(){
   L.push('已渲染帧数     ' + frameNo + '   实测fps ' + fpsShown + ' / 目标 ' + S.fps);
   L.push('画布           ' + canvas.width + '×' + canvas.height +
          '   CSS ' + canvas.style.width + ' × ' + canvas.style.height);
+  L.push('标定 black     ' + CAL.black.map(v => v.toFixed(4)).join(' / '));
+  L.push('标定 base      ' + (CAL.base ? CAL.base.map(v => v.toFixed(4)).join(' / ') : '未标定'));
+  L.push('自动曝光       ' + (gainInit ? autoGain.toFixed(5) : '未收敛') +
+         '   平均密度 ' + lastMeanD.toFixed(3));
   L.push('');
   L.push('WebGL2         ' + yn(!!gl));
   if (gl){
