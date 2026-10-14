@@ -136,9 +136,9 @@ const IFMT = FLOAT_RT ? gl.RGBA16F : gl.RGBA8;
 const S = {
   exposure: 0.0, gR: 1.45, gG: 1.50, gB: 1.60, crosstalk: 0.35, mask: 1.0,
   camGamma: 2.2, saturation: 1.05, contrast: 0.18, whitePoint: 5.0, autoExp: 1,
-  bloom: 0.45, bloomThresh: 0.82, glare: 0.012, halation: 0.10, grain: 0.025,
+  bloom: 0, bloomThresh: 0.82, glare: 0, halation: 0, grain: 0.02,
   fps: 24, shutter: 180, aspect: 2.39, inRes: 1080,
-  autoTrack: 1, orangeThresh: 25, lumaThresh: 45, smooth: 0.12,
+  autoTrack: 0, orangeThresh: 25, lumaThresh: 45, smooth: 0.12,
 };
 
 /* ====== 合成负片测试模式 (?demo=1) —— 不接摄像头即可验证整条管线 ====== */
@@ -168,10 +168,12 @@ uniform vec2 uC[4];                 // BL, BR, TL, TR —— 影格四角(纹理
 uniform vec2 uCropMin, uCropSize;
 uniform vec3 uBlack, uRef, uInvGamma, uGain;
 uniform float uCrosstalk, uCamGamma, uTrim;
+uniform mat3 uH;                    // 影格单应: 输出单位方块 → 相机纹理坐标
 out vec4 outColor;
 void main(){
   vec2 p  = uCropMin + vUv * uCropSize;
-  vec2 uv = mix(mix(uC[0], uC[1], p.x), mix(uC[2], uC[3], p.x), p.y);
+  vec3 q  = uH * vec3(p, 1.0);                  // 透视单应: 斜拍也能拉正, 不会扭成麻花
+  vec2 uv = q.xy / max(q.z, 1e-6);
   vec3 s  = texture(uVideo, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
 
   vec3 lin = pow(max(s, 1e-5), vec3(uCamGamma));
@@ -385,7 +387,7 @@ const BLOOM_LEVELS = 3;
 let FB = { hdrA:null, hdrB:null, hdrC:null, lvl:[], glare:null };
 function disposeFB(){
   del(FB.hdrA); del(FB.hdrB); del(FB.hdrC); del(FB.glare);
-  del(FB.probe);
+  del(FB.probe); del(FB.zero);
   FB.lvl.forEach(l => { del(l.a); del(l.b); });
   FB.lvl = [];
 }
@@ -400,6 +402,8 @@ function buildFB(W, H){
   const lw = Math.max(4, w >> 2), lh = Math.max(4, h >> 2);
   FB.glare = { a: rt(lw, lh), b: rt(lw, lh), w: lw, h: lh };
   FB.probe = rt(1, 1, gl.RGBA8);   // 必须 8bit, 才能用 RGBA/UNSIGNED_BYTE 读回
+  FB.zero = rt(1, 1, gl.RGBA8);    // 1x1 全黑, 供关闭发光层时占位
+  use(FB.zero); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
 }
 /* 单次可分离高斯(一次横或一次纵)。dst 不能同时被绑到采样器上,
    否则 WebGL 会判定 feedback loop 并丢弃这次绘制 */
@@ -539,6 +543,41 @@ function plausible(b){
   if (ar < 0.7 || ar > 2.4) return false;
   return true;
 }
+/* 四点单应: 输出单位方块 → 相机纹理坐标的四边形(列主序, 直接喂 uniformMatrix3fv)。
+   用真透视而不是双线性插值 —— 斜着拍的底片会被拉正, 而不是扭成麻花。 */
+function solve8(A, b){
+  const n = 8;
+  for (let i = 0; i < n; i++){
+    let p = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+    if (Math.abs(A[p][i]) < 1e-12) return null;
+    const tA = A[i]; A[i] = A[p]; A[p] = tA;
+    const tb = b[i]; b[i] = b[p]; b[p] = tb;
+    const piv = A[i][i];
+    for (let r = 0; r < n; r++){
+      if (r === i) continue;
+      const f = A[r][i] / piv;
+      if (!f) continue;
+      for (let c2 = i; c2 < n; c2++) A[r][c2] -= f * A[i][c2];
+      b[r] -= f * b[i];
+    }
+  }
+  const x = [];
+  for (let i = 0; i < n; i++) x.push(b[i] / A[i][i]);
+  return x;
+}
+function homography(c){          // c = [BL, BR, TL, TR] (纹理坐标, y 向上)
+  const unit = [[0,0],[1,0],[0,1],[1,1]];
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++){
+    const u = unit[i][0], v = unit[i][1], x = c[i][0], y = c[i][1];
+    A.push([u, v, 1, 0, 0, 0, -u*x, -v*x]); b.push(x);
+    A.push([0, 0, 0, u, v, 1, -u*y, -v*y]); b.push(y);
+  }
+  const h = solve8(A, b);
+  if (!h) return new Float32Array([1,0,0, 0,1,0, 0,0,1]);
+  return new Float32Array([h[0], h[3], h[6], h[1], h[4], h[7], h[2], h[5], 1]);
+}
 function smoothTo(target){
   const k = Math.max(0.02, Math.min(0.9, S.smooth));
   for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++)
@@ -638,17 +677,18 @@ function srcAspect(){
   const a = (w * vA) / Math.max(h, 1e-3);
   return (isFinite(a) && a > 0.2 && a < 8) ? a : vA;
 }
-function cropRect(){
+let frameAspect = 0;   // 冻结下来的片幅比例: 影格微动不再改变画布比例 → 画面不会被拉伸
+function cropRect(live){
   const A = +S.aspect || 0;
-  if (!A) return { min: [0, 0], size: [1, 1], aspect: srcAspect() };
-  const aS = srcAspect();
+  const aS = live ? srcAspect() : (frameAspect || srcAspect());
+  if (!A) return { min: [0, 0], size: [1, 1], aspect: aS };
   let fw = 1, fh = 1;
   if (A >= aS) fh = aS / A;      // 目标更宽 → 裁掉上下
   else fw = A / aS;              // 目标更方 → 裁掉左右
   return { min: [(1-fw)/2, (1-fh)/2], size: [fw, fh], aspect: A };
 }
 function layout(){
-  const cr = cropRect();
+  const cr = cropRect(true);
   const aw = window.innerWidth, ah = window.innerHeight;
   let w = aw, h = w / cr.aspect;
   if (h > ah){ h = ah; w = h * cr.aspect; }
@@ -665,6 +705,7 @@ function layout(){
   canvas.width = Math.max(64, resW);
   canvas.height = Math.max(64, resH);
   buildFB(canvas.width, canvas.height);
+  frameAspect = srcAspect();
 }
 function resizeEditor(){
   const vA = srcW() / srcH();
@@ -728,17 +769,12 @@ function render(now){
   gl.bindTexture(gl.TEXTURE_2D, camTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, srcEl());
 
-  /* 低频: 检测 + 自动曝光 (每 4 帧一次, 省算力) */
+  /* 低频: 刷新测光小图 + 自动曝光 (每 4 帧一次, 省算力)。
+     影格不再逐帧跟踪 —— 那会让画面跟着抖。框选改成点按钮的一次性动作。 */
   if (frameNo % 4 === 0){
-    const img = measure();
-    if (S.autoTrack && img){
-      const b = detect(img);
-      if (b && plausible(b)){ track.bbox = b; track.lost = 0; }
-      else { track.lost++; if (track.lost > 8) track.bbox = null; }
-    }
+    measure();
     autoExposure();            // 无论自动曝光是否开启都要估一次, 供 HUD 提示用
   }
-  if (S.autoTrack && track.bbox) smoothTo(boxToCorners(track.bbox));
 
   const ex = Math.pow(2, S.exposure);
   const g = (S.autoExp && gainInit ? autoGain : 1) * ex;
@@ -749,7 +785,7 @@ function render(now){
   gl.useProgram(P.color.p);
   use(FB.hdrA);
   bindTex(0, camTex); ui(P.color.u.uVideo, 0);
-  gl.uniform2fv(P.color.u.uC, new Float32Array([].concat(...track.corners)));
+  gl.uniformMatrix3fv(P.color.u.uH, false, homography(track.corners));
   u2(P.color.u.uCropMin, cr.min[0], cr.min[1]);
   u2(P.color.u.uCropSize, cr.size[0], cr.size[1]);
   u3v(P.color.u.uBlack, CAL.black);
@@ -780,6 +816,20 @@ function render(now){
     probe.el.textContent = '反相自检 E ∝ T^(-1/γ)   实测 / 期望\n' + got.map((g, i) =>
       'RGB'[i] + '  ' + g.toFixed(3) + ' / ' + exp[i].toFixed(3) +
       (Math.abs(g - exp[i]) / exp[i] < 0.03 ? '  ✓' : '  ✗')).join('\n');
+    /* 顺带验证影格单应解算: 拿一个梯形做四角回代 */
+    const tc = [[0.10, 0.20], [0.85, 0.10], [0.05, 0.90], [0.95, 0.85]];
+    const Ht = homography(tc);
+    const sq = [[0,0],[1,0],[0,1],[1,1]];
+    let e = 0;
+    for (let i = 0; i < 4; i++){
+      const u = sq[i][0], v = sq[i][1];
+      const X = Ht[0]*u + Ht[3]*v + Ht[6];
+      const Y = Ht[1]*u + Ht[4]*v + Ht[7];
+      const W = Ht[2]*u + Ht[5]*v + Ht[8];
+      e = Math.max(e, Math.abs(X/W - tc[i][0]), Math.abs(Y/W - tc[i][1]));
+    }
+    probe.el.textContent += '\n影格单应映射 最大角点误差 ' + e.toExponential(1) +
+      (e < 1e-6 ? '  ✓' : '  ✗');
   }
   const blendAmt = Math.min(0.9, Math.max(0, S.shutter / 360));
   if (blendAmt > 0.001){
@@ -793,30 +843,35 @@ function render(now){
     src = FB.hdrC;
   }
 
-  /* Pass 3: bloom 链 —— 阈值写进 L0.b, 再 H(L0.a) / V(L0.b) */
-  gl.useProgram(P.thresh.p);
-  const L0 = FB.lvl[0];
-  use(L0.b);
-  bindTex(0, src.t); ui(P.thresh.u.uSrc, 0);
-  u1(P.thresh.u.uThresh, S.bloomThresh);
-  u1(P.thresh.u.uWP, S.whitePoint);
-  u1(P.thresh.u.uScale, 1.6);
-  draw();
+  /* Pass 3/4: 发光层(bloom / halation / veiling)。默认全部为 0 —— 关闭时整条链路直接跳过,
+     既不会出怪光, 也省掉一大半 GPU 时间。需要时把「光学」里的滑块拉起来即可。 */
+  let blooms, gt;
+  if (S.bloom > 0.001 || S.halation > 0.001 || S.glare > 0.001){
+    gl.useProgram(P.thresh.p);
+    const L0 = FB.lvl[0];
+    use(L0.b);
+    bindTex(0, src.t); ui(P.thresh.u.uSrc, 0);
+    u1(P.thresh.u.uThresh, S.bloomThresh);
+    u1(P.thresh.u.uWP, S.whitePoint);
+    u1(P.thresh.u.uScale, 1.6);
+    draw();
 
-  const blooms = [ blurPair(L0.b.t, L0.w, L0.h, { a: L0.a, b: L0.b }, 1.0) ];
-  let prevT = L0.b.t, prevW = L0.w, prevH = L0.h;
-  for (let i = 1; i < FB.lvl.length; i++){
-    const L = FB.lvl[i];
-    downsample(prevT, prevW, prevH, L.a);
-    blooms.push(blurPair(L.a.t, L.w, L.h, { a: L.b, b: L.a }, 1.0 + i * 0.8));
-    prevT = L.a.t; prevW = L.w; prevH = L.h;
+    blooms = [ blurPair(L0.b.t, L0.w, L0.h, { a: L0.a, b: L0.b }, 1.0) ];
+    let prevT = L0.b.t, prevW = L0.w, prevH = L0.h;
+    for (let i = 1; i < FB.lvl.length; i++){
+      const L = FB.lvl[i];
+      downsample(prevT, prevW, prevH, L.a);
+      blooms.push(blurPair(L.a.t, L.w, L.h, { a: L.b, b: L.a }, 1.0 + i * 0.8));
+      prevT = L.a.t; prevW = L.w; prevH = L.h;
+    }
+    const G = FB.glare;
+    downsample(prevT, prevW, prevH, G.a);
+    gt = blurPair(G.a.t, G.w, G.h, { a: G.b, b: G.a }, 3.0);
+    gt = blurPair(gt, G.w, G.h, { a: G.b, b: G.a }, 4.5);
+  } else {
+    blooms = [FB.zero.t, FB.zero.t, FB.zero.t];
+    gt = FB.zero.t;
   }
-
-  /* Pass 4: veiling glare (超广域, 极低幅度) */
-  const G = FB.glare;
-  downsample(prevT, prevW, prevH, G.a);
-  let gt = blurPair(G.a.t, G.w, G.h, { a: G.b, b: G.a }, 3.0);
-  gt = blurPair(gt, G.w, G.h, { a: G.b, b: G.a }, 4.5);
 
   /* Pass 5: 合成 */
   gl.useProgram(P.comp.p);
@@ -844,8 +899,7 @@ function render(now){
     let t = '目标 <b>' + S.fps + '</b>fps · 实测 <b>' + fpsShown + '</b> · ' +
             canvas.width + '×' + canvas.height +
       (FLOAT_RT ? '' : '<br><span class="warn">无浮点渲染，高光/光晕受限</span>') +
-      (S.autoTrack ? (track.bbox ? '<br>已锁定影格' : '<br><span class="warn">搜索影格中…</span>')
-                   : '<br>手动取景');
+      '<br>影格：' + (frameSet ? '已框选' : '整幅（未框选）');
     if (running && lastMeanD > 1.7) t += '<br><span class="warn">画面偏暗：底片要对着背光/匀光板</span>';
     if (window.innerHeight > window.innerWidth) t += '<br><span class="warn">横屏效果更好</span>';
     hud.innerHTML = t;
@@ -871,7 +925,19 @@ function drawEditor(){
   for (let i = 0; i < 4; i++){ const p = pt(i);
     ctx.beginPath(); ctx.arc(p[0], p[1], 7, 0, 6.2832); ctx.fill(); }
 }
-let dragIdx = -1;
+let dragIdx = -1, frameSet = false;
+/* 一次性框选: 点一下按钮, 把影格定下来就不动了 —— 逐帧跟踪会让画面跟着抖 */
+function autoFrame(){
+  const img = measure();
+  if (!img){ toast('还没有画面'); return; }
+  const b = detect(img);
+  if (!b || !plausible(b)){ toast('没找到合适的片框，请手动拖四角'); return; }
+  track.bbox = b;
+  track.corners = boxToCorners(b);
+  frameSet = true;
+  if (!(+S.aspect)){ frameAspect = 0; layout(); }   // 源片幅模式: 按新影格重新适配画布比例
+  toast('已框选影格（可拖角点微调）');
+}
 function ptFromEvent(e){
   const r = roiCv.getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
@@ -886,7 +952,7 @@ roiCv.addEventListener('pointerdown', e => {
     const d = (px - x) ** 2 + (py - y) ** 2;
     if (d < bd){ bd = d; best = i; }
   }
-  if (bd < 44 * 44){ dragIdx = best; S.autoTrack = 0; syncUI(); e.preventDefault(); }
+  if (bd < 44 * 44){ dragIdx = best; frameSet = true; e.preventDefault(); }
 });
 window.addEventListener('pointermove', e => {
   if (dragIdx < 0) return;
@@ -929,10 +995,9 @@ const CTRL = [
   { g:'美学', t:'range', id:'shutter', label:'快门角度', min:0, max:360, step:5 },
   { g:'美学', t:'select', id:'aspect', label:'画幅',
     opts:[[0,'源片幅(不裁切)'],[2.39,'2.39 : 1 宽幅'],[1.85,'1.85 : 1'],[1.5,'3 : 2'],[1,'1 : 1']] },
-  { g:'跟踪', t:'check', id:'autoTrack', label:'自动跟踪影格' },
+  { g:'跟踪', t:'button', label:'① 自动框选影格（点一下，不会自动跟踪）', fn:autoFrame },
   { g:'跟踪', t:'range', id:'orangeThresh', label:'色罩阈值', min:5, max:60, step:1 },
   { g:'跟踪', t:'range', id:'lumaThresh', label:'亮度阈值', min:10, max:120, step:1 },
-  { g:'跟踪', t:'range', id:'smooth', label:'跟踪平滑', min:0.02, max:0.6, step:0.01 },
   { g:'跟踪', t:'button', label:'重置为整幅',
     fn:() => { track.corners = [[0,0],[1,0],[0,1],[1,1]]; track.bbox = null; } },
 ];
