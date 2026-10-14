@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>透射观片器 · Transmitted-Light Film Viewer</title>
+<style>
+  :root{ --bg:#0a0a0b; --fg:#e8e8ea; --dim:#8a8a92; --acc:#e0a34a; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font:13px/1.5 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  #stage{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  #out{ display:block; background:#000; touch-action:none; }
+  #hud{ position:fixed; left:8px; top:8px; z-index:4; font-variant-numeric:tabular-nums;
+    color:var(--dim); font-size:11px; pointer-events:none; text-shadow:0 1px 3px #000; line-height:1.5; }
+  #hud b{ color:var(--fg); font-weight:600; }
+  .warn{ color:#ffb454; }
+  #panel{ position:fixed; z-index:6; top:0; right:0; bottom:0; width:264px; max-width:84vw;
+    overflow-y:auto; -webkit-overflow-scrolling:touch; background:rgba(16,16,18,.95);
+    backdrop-filter:blur(10px); padding:10px 12px 40px; transform:translateX(102%);
+    transition:transform .22s ease; border-left:1px solid #262629; }
+  #panel.open{ transform:none; }
+  .grp{ margin:12px 0 4px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--acc); border-bottom:1px solid #262629; padding-bottom:4px; }
+  .row{ display:flex; align-items:center; gap:8px; margin:7px 0; }
+  .row label{ flex:0 0 78px; color:var(--dim); font-size:12px; }
+  .row input[type=range]{ flex:1; min-width:0; accent-color:var(--acc); height:22px; }
+  .row .val{ flex:0 0 40px; text-align:right; font-size:11px; color:var(--fg);
+    font-variant-numeric:tabular-nums; }
+  .row select{ flex:1; min-width:0; background:#1b1b1e; color:var(--fg); border:1px solid #333;
+    border-radius:6px; padding:5px 6px; font-size:12px; }
+  .row.chk{ justify-content:space-between; }
+  .row.chk input{ width:40px; height:22px; accent-color:var(--acc); }
+  button{ width:100%; margin:6px 0 0; padding:9px 10px; border-radius:8px; border:1px solid #333;
+    background:#1d1d21; color:var(--fg); font-size:12.5px; font-weight:500; }
+  button:active{ background:#2a2a30; }
+  button.primary{ background:var(--acc); border-color:var(--acc); color:#1a1207; font-weight:600; }
+  #tab{ position:fixed; z-index:7; top:8px; right:8px; width:auto; margin:0; padding:8px 14px;
+    border-radius:999px; background:rgba(22,22,26,.92); }
+  #setup{ position:fixed; z-index:5; left:8px; bottom:8px; width:288px; max-width:58vw;
+    background:rgba(14,14,16,.9); border:1px solid #262629; border-radius:10px;
+    padding:6px; transition:opacity .2s; }
+  #setup.dim{ opacity:.02; pointer-events:none; }
+  #cam{ width:100%; display:block; border-radius:6px; }
+  #roi{ position:absolute; left:6px; top:6px; width:calc(100% - 12px); touch-action:none; border-radius:6px; }
+  .hint{ color:var(--dim); font-size:10.5px; margin-top:5px; }
+  #overlay{ position:fixed; inset:0; z-index:9; background:#0a0a0b; display:none;
+    flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
+  #overlay.show{ display:flex; }
+  #overlay h1{ font-size:17px; margin:0; font-weight:600; }
+  #overlay p{ color:var(--dim); margin:0; max-width:340px; font-size:12.5px; }
+  #overlay button{ width:210px; }
+  #toast{ position:fixed; z-index:8; left:50%; bottom:26px; transform:translateX(-50%);
+    background:rgba(26,26,30,.95); border:1px solid #333; border-radius:8px; padding:8px 14px;
+    font-size:12px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  #toast.show{ opacity:1; }
+  #caps{ position:fixed; inset:0; z-index:11; background:rgba(8,8,10,.97); display:none;
+    padding:12px; overflow:auto; -webkit-overflow-scrolling:touch; }
+  #caps.show{ display:block; }
+  #caps .bar{ position:sticky; top:-12px; margin:-12px -12px 10px; padding:10px 12px;
+    background:rgba(8,8,10,.97); display:flex; gap:8px; border-bottom:1px solid #262629; }
+  #caps .bar button{ flex:1; margin:0; }
+  #caps pre{ margin:0; font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+    white-space:pre-wrap; word-break:break-word; color:#cfe0e8; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="out"></canvas></div>
+<div id="hud"></div>
+<div id="toast"></div>
+<button id="tab">参数</button>
+
+<div id="setup">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="roi"></canvas>
+  <div class="hint">拖动四个角点框选底片区域（或开启自动跟踪）</div>
+</div>
+
+<div id="panel"></div>
+
+<div id="overlay" class="show">
+  <h1>透射观片器</h1>
+  <p>手机摄像头对着透光底片，实时反相成正片，并模拟阳光透射的光学质感。</p>
+  <p class="hint">需在 HTTPS 或 localhost 下打开才能调用摄像头。</p>
+  <button id="startBtn" class="primary">开启摄像头</button>
+  <button id="setupBtn">显示取景区块</button>
+</div>
+
+<div id="caps">
+  <div class="bar">
+    <button id="capsRefresh">重新检测</button>
+    <button id="capsClose">关闭</button>
+  </div>
+  <pre id="capsText"></pre>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------
+   透射观片器原型 —— 单文件 WebGL2 实现
+
+   管线:
+     相机 ──▶ [几何校正 + 光照归一 + 密度反相 + 染料串扰解混]  (HDR 浮点)
+          ──▶ [时域累积 / 快门角度]
+          ──▶ [多级 bloom + halation + veiling glare]  (HDR 域内叠加)
+          ──▶ [filmic 色调映射 + 对比/饱和 + sRGB 编码 + 颗粒] ──▶ 屏幕
+
+   核心公式 (见 FS_COLOR):
+     lin = s^camGamma                      近似还原线性光(幂律逆 ISP)
+     T   = (lin - black) / (ref - black)   相对透射率, ref 由片基/光源标定得到
+     d   = -log10(T)                       相对密度(片基以上)
+     d'  = M^-1 · d                        染料串扰解混
+     E   = 10^(d'·invGamma)                还原到线性场景曝光域
+   ------------------------------------------------------------------ */
+
+const $ = (s) => document.querySelector(s);
+const canvas = $('#out'), video = $('#cam'), roiCv = $('#roi'), hud = $('#hud');
+
+const gl = canvas.getContext('webgl2', { alpha:false, antialias:false, depth:false,
+  stencil:false, premultipliedAlpha:false, preserveDrawingBuffer:false, desynchronized:true });
+if (!gl) {
+  document.body.innerHTML = '<div style="padding:24px;color:#eee">此浏览器不支持 WebGL2。</div>';
+  throw new Error('no webgl2');
+}
+let FLOAT_RT = !!gl.getExtension('EXT_color_buffer_float');
+if (!FLOAT_RT) FLOAT_RT = !!gl.getExtension('EXT_color_buffer_half_float');
+const IFMT = FLOAT_RT ? gl.RGBA16F : gl.RGBA8;
+
+/* ============================ 参数状态 ============================ */
+const S = {
+  exposure: 0.0, gR: 1.45, gG: 1.50, gB: 1.60, crosstalk: 0.35, mask: 1.0,
+  camGamma: 2.2, saturation: 1.05, contrast: 0.18, whitePoint: 5.0, autoExp: 1,
+  bloom: 0.55, bloomThresh: 1.0, glare: 0.02, halation: 0.25, grain: 0.025,
+  fps: 24, shutter: 180, aspect: 2.39,
+  autoTrack: 1, orangeThresh: 25, lumaThresh: 45, smooth: 0.12,
+};
+
+/* ====== 合成负片测试模式 (?demo=1) —— 不接摄像头即可验证整条管线 ====== */
+const DEMO = new URLSearchParams(location.search).has('demo');
+let demoCv = null;
+const srcEl = () => (DEMO ? demoCv : video);
+const srcW  = () => (DEMO ? 720 : (video.videoWidth || 16));
+const srcH  = () => (DEMO ? 480 : (video.videoHeight || 9));
+const DEMO_BASE_LIN = [0.647, 0.249, 0.049];   // 橙色色罩的线性光值
+const DEMO_GAMMA = [1.45, 1.50, 1.60];         // 与默认 γ 一致 → 反相后应还原场景
+
+/* ============================ 着色器 ============================ */
+const VS = `#version 300 es
+precision highp float;
+out vec2 vUv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  vUv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FS_COLOR = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uVideo;
+uniform vec2 uC[4];                 // BL, BR, TL, TR —— 影格四角(纹理坐标)
+uniform vec2 uCropMin, uCropSize;
+uniform vec3 uBlack, uRef, uInvGamma, uGain;
+uniform float uCrosstalk, uCamGamma, uTrim;
+out vec4 outColor;
+void main(){
+  vec2 p  = uCropMin + vUv * uCropSize;
+  vec2 uv = mix(mix(uC[0], uC[1], p.x), mix(uC[2], uC[3], p.x), p.y);
+  vec3 s  = texture(uVideo, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+
+  vec3 lin = pow(max(s, 1e-5), vec3(uCamGamma));
+  vec3 T   = (lin - uBlack) / max(uRef - uBlack, vec3(1e-4));
+  T = max(T, vec3(1e-4));
+
+  vec3 d = max(-log2(T) / log2(10.0) - uTrim, 0.0);
+
+  float k = uCrosstalk;
+  vec3 dd = vec3(dot(vec3( 1.0,     -0.30*k, -0.15*k), d),
+                 dot(vec3(-0.34*k,   1.0,    -0.15*k), d),
+                 dot(vec3(-0.10*k,  -0.30*k,  1.0   ), d));
+
+  vec3 E = pow(vec3(10.0), clamp(dd, 0.0, 6.0) * uInvGamma) * uGain;
+  outColor = vec4(min(E, vec3(1e4)), 1.0);
+}`;
+
+const FS_BLEND = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uCur, uPrev;
+uniform float uBlend;
+out vec4 outColor;
+void main(){
+  vec3 c = texture(uCur, vUv).rgb;
+  vec3 p = texture(uPrev, vUv).rgb;
+  outColor = vec4(mix(c, p, uBlend), 1.0);
+}`;
+
+const FS_THRESH = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+uniform float uThresh;
+out vec4 outColor;
+void main(){
+  vec3 c = texture(uSrc, vUv).rgb;
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float w = smoothstep(uThresh, uThresh * 1.8 + 0.05, l);
+  outColor = vec4(c * w, 1.0);
+}`;
+
+const FS_DOWN = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+uniform vec2 uStep;
+out vec4 outColor;
+void main(){
+  vec2 o = uStep;
+  vec3 c = texture(uSrc, vUv + vec2(-o.x, -o.y)).rgb
+         + texture(uSrc, vUv + vec2( o.x, -o.y)).rgb
+         + texture(uSrc, vUv + vec2(-o.x,  o.y)).rgb
+         + texture(uSrc, vUv + vec2( o.x,  o.y)).rgb;
+  outColor = vec4(c * 0.25, 1.0);
+}`;
+
+const FS_BLUR = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+uniform vec2 uStep, uDir;
+out vec4 outColor;
+const float O1 = 1.3846153846, O2 = 3.2307692308;
+const float W0 = 0.2270270270, W1 = 0.3162162162, W2 = 0.0702702703;
+void main(){
+  vec3 c = texture(uSrc, vUv).rgb * W0;
+  vec2 a = uDir * uStep * O1;
+  vec2 b = uDir * uStep * O2;
+  c += (texture(uSrc, vUv + a).rgb + texture(uSrc, vUv - a).rgb) * W1;
+  c += (texture(uSrc, vUv + b).rgb + texture(uSrc, vUv - b).rgb) * W2;
+  outColor = vec4(c, 1.0);
+}`;
+
+const FS_COMP = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uHDR, uB0, uB1, uB2, uGlare;
+uniform float uBloom, uGlareAmt, uHal, uGrain, uSat, uContrast, uWP, uTime;
+out vec4 outColor;
+
+vec3 filmic(vec3 x){
+  const float A=0.15, B=0.50, C=0.10, D=0.20, E=0.02, F=0.30;
+  return ((x*(A*x + C*B) + D*E) / (x*(A*x + B) + D*F)) - E/F;
+}
+vec3 oetf(vec3 c){
+  c = clamp(c, 0.0, 1.0);
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0/2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+
+void main(){
+  vec3 base  = texture(uHDR, vUv).rgb;
+  vec3 b0    = texture(uB0, vUv).rgb;
+  vec3 b1    = texture(uB1, vUv).rgb;
+  vec3 b2    = texture(uB2, vUv).rgb;
+  vec3 glare = texture(uGlare, vUv).rgb;
+
+  vec3 bloom = b0 * 0.45 + b1 * 0.35 + b2 * 0.20;
+  vec3 hal   = b2 * vec3(1.0, 0.34, 0.16);          // halation: 片基背散射, 偏红
+  vec3 hdr = base + bloom * uBloom + hal * uHal + glare * uGlareAmt + vec3(0.0008);
+
+  float wp = filmic(vec3(uWP)).r;
+  vec3 c = clamp(filmic(hdr * 1.6) / max(wp, 1e-3), 0.0, 1.0);
+
+  c = mix(c, c * c * (3.0 - 2.0 * c), uContrast);    // S 形对比
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float sat = uSat * (1.0 - 0.55 * smoothstep(0.72, 1.0, l));
+  c = clamp(vec3(l) + (c - vec3(l)) * sat, 0.0, 1.0);
+
+  c = oetf(c);
+  float n = hash(gl_FragCoord.xy + vec2(uTime * 137.0, uTime * 91.0)) - 0.5;
+  c += n * uGrain * (1.25 - 0.7 * l);
+  c += (hash(gl_FragCoord.xy * 0.913 + uTime) - 0.5) * 0.0016;   // dither 抗色带
+  outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`;
+
+/* 自检探针: 把两个采样点的比值写进 1 个像素, 用于验证 E ∝ T^(-1/γ) */
+const FS_PROBE = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+uniform vec2 uA, uB;
+out vec4 outColor;
+void main(){
+  vec3 a = texture(uSrc, uA).rgb;
+  vec3 b = max(texture(uSrc, uB).rgb, vec3(1e-6));
+  outColor = vec4(a / b * 0.5, 1.0);
+}`;
+
+/* ============================ GL 基础设施 ============================ */
+function sh(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) + '\n' + src);
+  return s;
+}
+function prog(vs, fs){
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){
+    const info = gl.getActiveUniform(p, i);
+    u[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, info.name);
+  }
+  return { p, u };
+}
+function tex(w, h, fmt){
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt || IFMT, Math.max(1, w|0), Math.max(1, h|0));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return t;
+}
+function rt(w, h, fmt){
+  const t = tex(w, h, fmt), f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { t, f, w: Math.max(1, w|0), h: Math.max(1, h|0) };
+}
+function del(o){ if (!o) return; if (o.f) gl.deleteFramebuffer(o.f); if (o.t) gl.deleteTexture(o.t); }
+function use(o){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, o ? o.f : null);
+  gl.viewport(0, 0, o ? o.w : canvas.width, o ? o.h : canvas.height);
+}
+const draw = () => gl.drawArrays(gl.TRIANGLES, 0, 3);
+function bindTex(unit, t){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); }
+function u1(loc, v){ if (loc) gl.uniform1f(loc, v); }
+function u2(loc, a, b){ if (loc) gl.uniform2f(loc, a, b); }
+function u3(loc, a, b, c){ if (loc) gl.uniform3f(loc, a, b, c); }
+function u3v(loc, v){ if (loc) gl.uniform3fv(loc, v); }
+function ui(loc, v){ if (loc) gl.uniform1i(loc, v); }
+
+const P = {};
+try {
+  P.color = prog(VS, FS_COLOR); P.blend = prog(VS, FS_BLEND); P.thresh = prog(VS, FS_THRESH);
+  P.down = prog(VS, FS_DOWN);   P.blur = prog(VS, FS_BLUR);   P.comp = prog(VS, FS_COMP);
+  P.probe = prog(VS, FS_PROBE);
+} catch (e) {
+  document.body.innerHTML = '<pre style="color:#f88;padding:16px;white-space:pre-wrap">' + e.message + '</pre>';
+  throw e;
+}
+
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+/* ============================ 帧缓冲 ============================ */
+const BLOOM_LEVELS = 3;
+let FB = { hdrA:null, hdrB:null, hdrC:null, lvl:[], glare:null };
+function disposeFB(){
+  del(FB.hdrA); del(FB.hdrB); del(FB.hdrC); del(FB.glare);
+  del(FB.probe);
+  FB.lvl.forEach(l => { del(l.a); del(l.b); });
+  FB.lvl = [];
+}
+function buildFB(W, H){
+  disposeFB();
+  FB.hdrA = rt(W, H); FB.hdrB = rt(W, H); FB.hdrC = rt(W, H);
+  let w = W, h = H;
+  for (let i = 0; i < BLOOM_LEVELS; i++){
+    w = Math.max(4, w >> 1); h = Math.max(4, h >> 1);
+    FB.lvl.push({ a: rt(w, h), b: rt(w, h), w, h });
+  }
+  const lw = Math.max(4, w >> 2), lh = Math.max(4, h >> 2);
+  FB.glare = { a: rt(lw, lh), b: rt(lw, lh), w: lw, h: lh };
+  FB.probe = rt(1, 1, gl.RGBA8);   // 必须 8bit, 才能用 RGBA/UNSIGNED_BYTE 读回
+}
+/* 单次可分离高斯(一次横或一次纵)。dst 不能同时被绑到采样器上,
+   否则 WebGL 会判定 feedback loop 并丢弃这次绘制 */
+function blurPass(srcTex, sw, sh, dst, vertical, radius){
+  gl.useProgram(P.blur.p);
+  use(dst);
+  bindTex(0, srcTex); ui(P.blur.u.uSrc, 0);
+  u2(P.blur.u.uStep, 1 / sw, 1 / sh);
+  if (vertical) u2(P.blur.u.uDir, 0, radius);
+  else u2(P.blur.u.uDir, radius, 0);
+  draw();
+}
+/* 横 + 纵, 结果落在 pair.b。约束: src !== pair.a */
+function blurPair(srcTex, sw, sh, pair, radius){
+  blurPass(srcTex, sw, sh, pair.a, false, radius);
+  blurPass(pair.a.t, sw, sh, pair.b, true, radius);
+  return pair.b.t;
+}
+function downsample(srcTex, sw, sh, dst){
+  gl.useProgram(P.down.p);
+  use(dst);
+  bindTex(0, srcTex); ui(P.down.u.uSrc, 0);
+  u2(P.down.u.uStep, 0.75 / sw, 0.75 / sh);
+  draw();
+}
+
+/* ============================ 相机 ============================ */
+let stream = null, running = false, torchOn = false, wl = null;
+const track = { corners: [[0,0],[1,0],[0,1],[1,1]], bbox: null, lost: 0 };
+
+async function startCamera(){
+  const v = { facingMode: { ideal: 'environment' },
+    width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30, max: 30 } };
+  stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+  video.srcObject = stream;
+  await video.play();
+  await new Promise(r => { if (video.videoWidth) r(); else video.onloadedmetadata = r; });
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  resizeEditor(); layout();
+  running = true; lastDraw = 0;
+  wakeLock();
+}
+async function lockCamera(){
+  const t = stream && stream.getVideoTracks()[0]; if (!t) return false;
+  const caps = t.getCapabilities ? t.getCapabilities() : {};
+  const adv = [];
+  if (caps.focusMode && caps.focusMode.includes('continuous')) adv.push({ focusMode: 'continuous' });
+  if (caps.exposureMode && caps.exposureMode.includes('manual')) adv.push({ exposureMode: 'manual' });
+  if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('manual')) adv.push({ whiteBalanceMode: 'manual' });
+  try { if (adv.length) await t.applyConstraints({ advanced: adv }); return adv.length > 0; }
+  catch (e) { return false; }
+}
+async function toggleTorch(){
+  const t = stream && stream.getVideoTracks()[0]; if (!t) return;
+  const caps = t.getCapabilities ? t.getCapabilities() : {};
+  if (!caps.torch) { toast('该设备不支持手电筒 (torch)'); return; }
+  torchOn = !torchOn;
+  try { await t.applyConstraints({ advanced: [{ torch: torchOn }] }); } catch (e) {}
+}
+async function wakeLock(){
+  try { if ('wakeLock' in navigator && !wl) wl = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+
+/* ============================ 分析 / 跟踪 / 标定 ============================ */
+const AW = 64, AH = 36;
+const Acv = document.createElement('canvas'); Acv.width = AW; Acv.height = AH;
+const Actx = Acv.getContext('2d', { willReadFrequently: true });
+let Aimg = null;
+
+function measure(){
+  if (!DEMO && !video.videoWidth) return null;
+  Actx.drawImage(srcEl(), 0, 0, AW, AH);
+  Aimg = Actx.getImageData(0, 0, AW, AH);
+  return Aimg;
+}
+function span(a){
+  let mx = 0; for (let i = 0; i < a.length; i++) mx = Math.max(mx, a[i]);
+  if (mx < a.length * 0.18) return null;
+  const th = mx * 0.28;
+  let s = -1, e = -1;
+  for (let i = 0; i < a.length; i++) if (a[i] >= th){ if (s < 0) s = i; e = i; }
+  return (s >= 0 && e - s > a.length * 0.15) ? [s, e] : null;
+}
+/* 色罩色度阈值 + 行列投影 → 影格包围盒(分析画布坐标, y 向下) */
+function detect(i){
+  const d = i.data;
+  const col = new Float32Array(AW), row = new Float32Array(AH);
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++){
+    const o = (y * AW + x) * 4, r = d[o], g = d[o+1], b = d[o+2];
+    const Y  = 0.299*r + 0.587*g + 0.114*b;
+    const Cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
+    const Cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
+    if (Y > S.lumaThresh && (Cr - Cb) > S.orangeThresh){ col[x] += 1; row[y] += 1; }
+  }
+  const bx = span(col), by = span(row);
+  if (!bx || !by) return null;
+  return { x0: Math.max(0, bx[0]-2), x1: Math.min(AW-1, bx[1]+2),
+           y0: Math.max(0, by[0]-2), y1: Math.min(AH-1, by[1]+2) };
+}
+function boxToCorners(b){
+  const u0 = b.x0 / AW, u1 = (b.x1 + 1) / AW;
+  const v1 = 1 - b.y0 / AH, v0 = 1 - (b.y1 + 1) / AH;
+  return [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
+}
+function smoothTo(target){
+  const k = Math.max(0.02, Math.min(0.9, S.smooth));
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++)
+    track.corners[i][j] += (target[i][j] - track.corners[i][j]) * k;
+}
+
+const CAL = { black: [0, 0, 0], base: null, light: null };
+let autoGain = 0.05, gainInit = false;
+function roiInC(x, y){
+  const c = track.corners;
+  const lo = Math.min(c[0][0], c[2][0]), hi = Math.max(c[1][0], c[3][0]);
+  const vlo = Math.min(c[0][1], c[1][1]), vhi = Math.max(c[2][1], c[3][1]);
+  const u = (x + 0.5) / AW, v = 1 - (y + 0.5) / AH;
+  return u > lo + (hi-lo)*0.12 && u < hi - (hi-lo)*0.12
+      && v > vlo + (vhi-vlo)*0.12 && v < vhi - (vhi-vlo)*0.12;
+}
+function meanLin(insideOnly){
+  const i = Aimg || measure(); if (!i) return null;
+  const acc = [0,0,0]; let n = 0; const d = i.data;
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++){
+    if (insideOnly && !roiInC(x, y)) continue;
+    const o = (y*AW + x) * 4;
+    acc[0] += Math.pow(d[o]/255, S.camGamma);
+    acc[1] += Math.pow(d[o+1]/255, S.camGamma);
+    acc[2] += Math.pow(d[o+2]/255, S.camGamma);
+    n++;
+  }
+  return n ? acc.map(v => v / n) : null;
+}
+function percentile(insideOnly, p){
+  const i = Aimg || measure(); if (!i) return null;
+  const bins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  const d = i.data; let n = 0;
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++){
+    if (insideOnly && !roiInC(x, y)) continue;
+    const o = (y*AW + x) * 4;
+    bins[0][d[o]]++; bins[1][d[o+1]]++; bins[2][d[o+2]]++; n++;
+  }
+  if (!n) return null;
+  const out = [];
+  for (let c = 0; c < 3; c++){
+    let acc = 0, idx = 255;
+    for (let v = 0; v < 256; v++){ acc += bins[c][v]; if (acc >= n * p){ idx = v; break; } }
+    out.push(Math.pow(idx / 255, S.camGamma));
+  }
+  return out;
+}
+function calLight(){ measure(); const m = meanLin(false); if (m){ CAL.light = m; toast('已标定光源(遮住胶片，只拍透光背光)'); } }
+function calBase(){  measure(); const m = meanLin(true);  if (m){ CAL.base  = m; toast('已标定片基(拍空片头/片尾)'); } }
+function calBlack(){ measure(); const p = percentile(false, 0.01); if (p){ CAL.black = p; toast('已标定黑电平'); } }
+function calAuto(){
+  measure();
+  const lo = percentile(true, 0.02), hi = percentile(true, 0.96);
+  if (lo && hi){
+    CAL.black = lo; CAL.base = hi; CAL.light = hi.slice();
+    gainInit = false; toast('已按当前画面自动标定');
+  }
+}
+function refVec(){
+  const b = CAL.base, l = CAL.light;
+  if (b && l){ const k = Math.min(1, Math.max(0, S.mask));
+    return [0,1,2].map(i => b[i]*k + l[i]*(1-k)); }
+  if (b) return b;
+  if (l) return l;
+  return percentile(true, 0.9) || [0.9, 0.9, 0.9];
+}
+/* 自动曝光: 在密度域取平均密度, 反解增益 —— 比在 sRGB 域调更稳定 */
+function autoExposure(){
+  const i = Aimg; if (!i) return null;
+  const ref = refVec(), d = i.data;
+  const dsum = [0,0,0]; let n = 0;
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++){
+    if (!roiInC(x, y)) continue;
+    for (let c = 0; c < 3; c++){
+      const lin = Math.pow(d[(y*AW + x)*4 + c] / 255, S.camGamma);
+      const T = Math.max((lin - CAL.black[c]) / Math.max(ref[c] - CAL.black[c], 1e-4), 1e-4);
+      dsum[c] += -Math.log10(T);
+    }
+    n++;
+  }
+  if (n < 8) return null;
+  const inv = [1/S.gR, 1/S.gG, 1/S.gB], target = 0.19;
+  const g = [0,1,2].map(c => target / Math.pow(10, (dsum[c] / n) * inv[c]));
+  const m = Math.pow(Math.max(g[0],1e-6) * Math.max(g[1],1e-6) * Math.max(g[2],1e-6), 1/3);
+  autoGain = gainInit ? autoGain * 0.85 + m * 0.15 : m;
+  gainInit = true;
+  return autoGain;
+}
+
+/* ============================ 画面几何 ============================ */
+function srcAspect(){
+  const c = track.corners;
+  const vA = srcW() / srcH();
+  const w = (Math.abs(c[1][0]-c[0][0]) + Math.abs(c[3][0]-c[2][0])) / 2;
+  const h = (Math.abs(c[2][1]-c[0][1]) + Math.abs(c[3][1]-c[1][1])) / 2;
+  const a = (w * vA) / Math.max(h, 1e-3);
+  return (isFinite(a) && a > 0.2 && a < 8) ? a : vA;
+}
+function cropRect(){
+  const A = +S.aspect || 0;
+  if (!A) return { min: [0, 0], size: [1, 1], aspect: srcAspect() };
+  const aS = srcAspect();
+  let fw = 1, fh = 1;
+  if (A >= aS) fh = aS / A;      // 目标更宽 → 裁掉上下
+  else fw = A / aS;              // 目标更方 → 裁掉左右
+  return { min: [(1-fw)/2, (1-fh)/2], size: [fw, fh], aspect: A };
+}
+function layout(){
+  const cr = cropRect();
+  const aw = window.innerWidth, ah = window.innerHeight;
+  let w = aw, h = w / cr.aspect;
+  if (h > ah){ h = ah; w = h * cr.aspect; }
+  canvas.style.width = Math.round(w) + 'px';
+  canvas.style.height = Math.round(h) + 'px';
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let resH = Math.min(Math.round(h * dpr), 900);
+  let resW = Math.round(resH * cr.aspect);
+  const maxPix = 1.8e6;          // 移动端显存上限(中间 FBO 为 RGBA16F)
+  if (resW * resH > maxPix){
+    const k = Math.sqrt(maxPix / (resW * resH));
+    resH = Math.round(resH * k); resW = Math.round(resW * k);
+  }
+  canvas.width = Math.max(64, resW);
+  canvas.height = Math.max(64, resH);
+  buildFB(canvas.width, canvas.height);
+}
+function resizeEditor(){
+  const vw = srcW(), vh = srcH();
+  const w = 288;
+  roiCv.width = w; roiCv.height = Math.round(w * vh / vw);
+  roiCv.style.height = roiCv.height + 'px';
+}
+
+/* ============================ 主循环 ============================ */
+let lastDraw = 0, frameNo = 0, fpsShown = 0, fpsT = 0, fpsN = 0;
+
+const CHECK = DEMO && new URLSearchParams(location.search).has('check');
+const probe = {
+  el: (() => {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;z-index:12;left:8px;bottom:8px;color:#8f8;font:12px monospace;'
+      + 'background:rgba(0,0,0,.82);padding:6px 8px;border-radius:6px;display:none;white-space:pre';
+    document.body.appendChild(d); return d;
+  })(),
+  /* 输出 uv → 相机图像归一化坐标 (y 向下) */
+  mapSrc(pu, pv){
+    const cr = cropRect();
+    return [cr.min[0] + pu * cr.size[0], 1 - (cr.min[1] + pv * cr.size[1])];
+  },
+  /* 与 renderDemo 完全一致的合成场景 */
+  scene(u, v){
+    let E = [0.03 + 3.2 * Math.pow(1 - v, 2.2),
+             0.03 + 3.0 * Math.pow(1 - v, 2.0),
+             0.06 + 2.4 * Math.pow(1 - v, 1.7)];
+    if (v > 0.6){
+      const t = (v - 0.6) / 0.4;
+      E = [0.03 + 0.55 * t, 0.025 + 0.34 * t, 0.02 + 0.16 * t];
+    }
+    const dx = (u - 0.72) * 360, dy = (v - 0.26) * 264;
+    const sun = Math.exp(-(dx * dx + dy * dy) / (2 * 15 * 15));
+    return [E[0] + sun * 30, E[1] + sun * 26, E[2] + sun * 9];
+  },
+  expected(){
+    /* 负片低于片基透射率的曝光已被削顶(renderDemo 里的 min), 属物理不可恢复,
+       期望值必须同样削顶, 否则比的是"理想场景"而不是"这张底片" */
+    const a = this.scene(...this.mapSrc(0.20, 0.80)).map(v => Math.max(v, 1));
+    const b = this.scene(...this.mapSrc(0.20, 0.60)).map(v => Math.max(v, 1));
+    return a.map((v, i) => v / b[i]);
+  },
+};
+
+function render(now){
+  requestAnimationFrame(render);
+  if (!running) return;
+  const interval = 1000 / (S.fps || 24);
+  if (now - lastDraw < interval * 0.92) return;
+  lastDraw = now;
+  frameNo++;
+
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, srcEl());
+
+  /* 低频: 检测 + 自动曝光 (每 4 帧一次, 省算力) */
+  if (frameNo % 4 === 0){
+    const img = measure();
+    if (S.autoTrack && img){
+      const b = detect(img);
+      if (b){ track.bbox = b; track.lost = 0; } else track.lost++;
+    }
+    if (S.autoExp) autoExposure();
+  }
+  if (S.autoTrack && track.bbox) smoothTo(boxToCorners(track.bbox));
+
+  const ex = Math.pow(2, S.exposure);
+  const g = (S.autoExp && gainInit ? autoGain : 1) * ex;
+  const gain = [g, g, g];
+
+  /* Pass 1: 几何 + 色彩模型 → HDR */
+  const cr = cropRect();
+  gl.useProgram(P.color.p);
+  use(FB.hdrA);
+  bindTex(0, camTex); ui(P.color.u.uVideo, 0);
+  gl.uniform2fv(P.color.u.uC, new Float32Array([].concat(...track.corners)));
+  u2(P.color.u.uCropMin, cr.min[0], cr.min[1]);
+  u2(P.color.u.uCropSize, cr.size[0], cr.size[1]);
+  u3v(P.color.u.uBlack, CAL.black);
+  u3v(P.color.u.uRef, refVec());
+  u3(P.color.u.uInvGamma, 1/S.gR, 1/S.gG, 1/S.gB);
+  u3v(P.color.u.uGain, gain);
+  u1(P.color.u.uCrosstalk, S.crosstalk);
+  u1(P.color.u.uCamGamma, S.camGamma);
+  u1(P.color.u.uTrim, 0);
+  draw();
+
+  /* Pass 2: 时域累积(快门角度) */
+  let src = FB.hdrA;
+
+  /* 数值自检: HDR 域内两点比值应等于场景曝光比 —— 即验证 E = 10^(d/γ) */
+  if (CHECK && frameNo >= 3 && !probe.done){
+    probe.done = true;
+    gl.useProgram(P.probe.p);
+    use(FB.probe);
+    bindTex(0, FB.hdrA.t); ui(P.probe.u.uSrc, 0);
+    u2(P.probe.u.uA, 0.20, 0.80);
+    u2(P.probe.u.uB, 0.20, 0.60);
+    draw();
+    const px = new Uint8Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const got = [px[0], px[1], px[2]].map(v => v / 255 * 2);
+    const exp = probe.expected();
+    probe.el.textContent = '反相自检 E ∝ T^(-1/γ)   实测 / 期望\n' + got.map((g, i) =>
+      'RGB'[i] + '  ' + g.toFixed(3) + ' / ' + exp[i].toFixed(3) +
+      (Math.abs(g - exp[i]) / exp[i] < 0.03 ? '  ✓' : '  ✗')).join('\n');
+  }
+  const blendAmt = Math.min(0.9, Math.max(0, S.shutter / 360));
+  if (blendAmt > 0.001){
+    gl.useProgram(P.blend.p);
+    use(FB.hdrB);
+    bindTex(0, FB.hdrA.t); ui(P.blend.u.uCur, 0);
+    bindTex(1, FB.hdrC.t); ui(P.blend.u.uPrev, 1);
+    u1(P.blend.u.uBlend, blendAmt);
+    draw();
+    const t = FB.hdrC; FB.hdrC = FB.hdrB; FB.hdrB = t;  // 交换累积缓冲
+    src = FB.hdrC;
+  }
+
+  /* Pass 3: bloom 链 —— 阈值写进 L0.b, 再 H(L0.a) / V(L0.b) */
+  gl.useProgram(P.thresh.p);
+  const L0 = FB.lvl[0];
+  use(L0.b);
+  bindTex(0, src.t); ui(P.thresh.u.uSrc, 0);
+  u1(P.thresh.u.uThresh, S.bloomThresh);
+  draw();
+
+  const blooms = [ blurPair(L0.b.t, L0.w, L0.h, { a: L0.a, b: L0.b }, 1.0) ];
+  let prevT = L0.b.t, prevW = L0.w, prevH = L0.h;
+  for (let i = 1; i < FB.lvl.length; i++){
+    const L = FB.lvl[i];
+    downsample(prevT, prevW, prevH, L.a);
+    blooms.push(blurPair(L.a.t, L.w, L.h, { a: L.b, b: L.a }, 1.0 + i * 0.8));
+    prevT = L.a.t; prevW = L.w; prevH = L.h;
+  }
+
+  /* Pass 4: veiling glare (超广域, 极低幅度) */
+  const G = FB.glare;
+  downsample(prevT, prevW, prevH, G.a);
+  let gt = blurPair(G.a.t, G.w, G.h, { a: G.b, b: G.a }, 3.0);
+  gt = blurPair(gt, G.w, G.h, { a: G.b, b: G.a }, 4.5);
+
+  /* Pass 5: 合成 */
+  gl.useProgram(P.comp.p);
+  use(null);
+  bindTex(0, src.t);     ui(P.comp.u.uHDR, 0);
+  bindTex(1, blooms[0]); ui(P.comp.u.uB0, 1);
+  bindTex(2, blooms[1]); ui(P.comp.u.uB1, 2);
+  bindTex(3, blooms[2]); ui(P.comp.u.uB2, 3);
+  bindTex(4, gt);        ui(P.comp.u.uGlare, 4);
+  u1(P.comp.u.uBloom, S.bloom);
+  u1(P.comp.u.uGlareAmt, S.glare);
+  u1(P.comp.u.uHal, S.halation);
+  u1(P.comp.u.uGrain, S.grain);
+  u1(P.comp.u.uSat, S.saturation);
+  u1(P.comp.u.uContrast, S.contrast);
+  u1(P.comp.u.uWP, S.whitePoint);
+  u1(P.comp.u.uTime, (frameNo % 512) / 24);
+  draw();
+
+  /* HUD + 取景编辑器 */
+  fpsN++;
+  if (now - fpsT > 500){ fpsShown = Math.round(fpsN * 1000 / (now - fpsT)); fpsT = now; fpsN = 0; }
+  drawEditor();
+  if (frameNo <= 1 || frameNo % 6 === 0){   // 首帧立即写一次, 之后每 6 帧重写(省 DOM 布局)
+    hud.innerHTML =
+      '目标 <b>' + S.fps + '</b>fps · 实测 <b>' + fpsShown + '</b> · ' + canvas.width + '×' + canvas.height +
+      (FLOAT_RT ? '' : '<br><span class="warn">无浮点渲染，高光/光晕受限</span>') +
+      (S.autoTrack ? (track.bbox ? '<br>已锁定影格' : '<br><span class="warn">搜索影格中…</span>')
+                   : '<br>手动取景');
+  }
+}
+
+/* ============================ 取景编辑器 ============================ */
+const setupBox = $('#setup');
+function drawEditor(){
+  if (setupBox.classList.contains('dim') || (!DEMO && !video.videoWidth)) return;
+  const w = roiCv.width, h = roiCv.height;
+  const ctx = roiCv.getContext('2d');
+  ctx.drawImage(srcEl(), 0, 0, w, h);
+  const c = track.corners;
+  const pt = (i) => [c[i][0] * w, (1 - c[i][1]) * h];
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(224,163,74,.95)';
+  ctx.beginPath();
+  const seq = [2, 3, 1, 0, 2];
+  ctx.moveTo(...pt(seq[0]));
+  for (let i = 1; i < seq.length; i++) ctx.lineTo(...pt(seq[i]));
+  ctx.stroke();
+  ctx.fillStyle = '#e0a34a';
+  for (let i = 0; i < 4; i++){ const p = pt(i);
+    ctx.beginPath(); ctx.arc(p[0], p[1], 7, 0, 6.2832); ctx.fill(); }
+}
+let dragIdx = -1;
+function ptFromEvent(e){
+  const r = roiCv.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return [(t.clientX - r.left) / r.width * roiCv.width,
+          (t.clientY - r.top) / r.height * roiCv.height];
+}
+roiCv.addEventListener('pointerdown', e => {
+  const [x, y] = ptFromEvent(e);
+  let best = -1, bd = 1e9;
+  for (let i = 0; i < 4; i++){
+    const px = track.corners[i][0] * roiCv.width, py = (1 - track.corners[i][1]) * roiCv.height;
+    const d = (px - x) ** 2 + (py - y) ** 2;
+    if (d < bd){ bd = d; best = i; }
+  }
+  if (bd < 44 * 44){ dragIdx = best; S.autoTrack = 0; syncUI(); e.preventDefault(); }
+});
+window.addEventListener('pointermove', e => {
+  if (dragIdx < 0) return;
+  const [x, y] = ptFromEvent(e);
+  track.corners[dragIdx][0] = Math.min(1, Math.max(0, x / roiCv.width));
+  track.corners[dragIdx][1] = Math.min(1, Math.max(0, 1 - y / roiCv.height));
+  e.preventDefault();
+});
+window.addEventListener('pointerup', () => { dragIdx = -1; });
+
+/* ============================ UI ============================ */
+const CTRL = [
+  { g:'标定', t:'button', label:'① 标定裸光源(不含胶片)', fn:calLight },
+  { g:'标定', t:'button', label:'② 标定空片头(片基)',     fn:calBase },
+  { g:'标定', t:'button', label:'③ 遮住镜头标定黑电平',   fn:calBlack },
+  { g:'标定', t:'button', label:'一键自动标定当前画面',   fn:calAuto },
+  { g:'标定', t:'button', label:'尝试锁定曝光/白平衡', fn:() => lockCamera().then(ok =>
+      toast(ok ? '已请求锁定，部分机型不支持' : '该机型不支持锁定')) },
+  { g:'标定', t:'button', label:'手电筒 (torch) 开/关', fn:toggleTorch },
+  { g:'色彩', t:'range', id:'exposure', label:'曝光',   min:-2, max:2, step:0.01 },
+  { g:'色彩', t:'range', id:'gR', label:'γ R', min:0.5, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'gG', label:'γ G', min:0.5, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'gB', label:'γ B', min:0.5, max:3, step:0.01 },
+  { g:'色彩', t:'range', id:'crosstalk', label:'串扰解混', min:0, max:1, step:0.01 },
+  { g:'色彩', t:'range', id:'mask', label:'去色罩', min:0, max:1, step:0.01 },
+  { g:'色彩', t:'range', id:'camGamma', label:'相机线性化', min:1, max:3, step:0.05 },
+  { g:'色彩', t:'range', id:'saturation', label:'饱和度', min:0, max:2, step:0.01 },
+  { g:'色彩', t:'range', id:'contrast', label:'对比', min:0, max:0.7, step:0.01 },
+  { g:'色彩', t:'range', id:'whitePoint', label:'高光白点', min:1, max:16, step:0.1 },
+  { g:'色彩', t:'check', id:'autoExp', label:'自动曝光' },
+  { g:'光学', t:'range', id:'bloom', label:'高光溢出', min:0, max:2, step:0.01 },
+  { g:'光学', t:'range', id:'bloomThresh', label:'溢出阈值', min:0.3, max:4, step:0.05 },
+  { g:'光学', t:'range', id:'halation', label:'光晕 halation', min:0, max:1.5, step:0.01 },
+  { g:'光学', t:'range', id:'glare', label:'veiling 散射', min:0, max:0.15, step:0.002 },
+  { g:'光学', t:'range', id:'grain', label:'颗粒', min:0, max:0.12, step:0.002 },
+  { g:'美学', t:'select', id:'fps', label:'帧率', opts:[[24,'24 fps 电影'],[30,'30 fps'],[60,'60 fps']] },
+  { g:'美学', t:'range', id:'shutter', label:'快门角度', min:0, max:360, step:5 },
+  { g:'美学', t:'select', id:'aspect', label:'画幅',
+    opts:[[0,'源片幅(不裁切)'],[2.39,'2.39 : 1 宽幅'],[1.85,'1.85 : 1'],[1.5,'3 : 2'],[1,'1 : 1']] },
+  { g:'跟踪', t:'check', id:'autoTrack', label:'自动跟踪影格' },
+  { g:'跟踪', t:'range', id:'orangeThresh', label:'色罩阈值', min:5, max:60, step:1 },
+  { g:'跟踪', t:'range', id:'lumaThresh', label:'亮度阈值', min:10, max:120, step:1 },
+  { g:'跟踪', t:'range', id:'smooth', label:'跟踪平滑', min:0.02, max:0.6, step:0.01 },
+  { g:'跟踪', t:'button', label:'重置为整幅',
+    fn:() => { track.corners = [[0,0],[1,0],[0,1],[1,1]]; track.bbox = null; } },
+];
+const panel = $('#panel'), inputs = {};
+(function buildUI(){
+  let lastG = '';
+  for (const c of CTRL){
+    if (c.g !== lastG){
+      const d = document.createElement('div'); d.className = 'grp'; d.textContent = c.g;
+      panel.appendChild(d); lastG = c.g;
+    }
+    if (c.t === 'button'){
+      const b = document.createElement('button'); b.textContent = c.label; b.onclick = c.fn;
+      panel.appendChild(b); continue;
+    }
+    const row = document.createElement('div');
+    row.className = 'row' + (c.t === 'check' ? ' chk' : '');
+    const lab = document.createElement('label'); lab.textContent = c.label;
+    row.appendChild(lab);
+    let el;
+    if (c.t === 'select'){
+      el = document.createElement('select');
+      for (const o of c.opts){ const op = document.createElement('option');
+        op.value = o[0]; op.textContent = o[1]; el.appendChild(op); }
+      el.value = S[c.id];
+      el.onchange = () => { S[c.id] = parseFloat(el.value); if (c.id === 'aspect') layout(); };
+      row.appendChild(el);
+    } else if (c.t === 'check'){
+      el = document.createElement('input'); el.type = 'checkbox'; el.checked = !!S[c.id];
+      el.onchange = () => { S[c.id] = el.checked ? 1 : 0; };
+      row.appendChild(el);
+    } else {
+      el = document.createElement('input'); el.type = 'range';
+      el.min = c.min; el.max = c.max; el.step = c.step; el.value = S[c.id];
+      const v = document.createElement('span'); v.className = 'val';
+      v.textContent = (+S[c.id]).toFixed(2);
+      el.oninput = () => { S[c.id] = parseFloat(el.value); v.textContent = (+el.value).toFixed(2); };
+      row.appendChild(el); row.appendChild(v);
+    }
+    panel.appendChild(row); inputs[c.id] = el;
+  }
+  const bf = document.createElement('button'); bf.textContent = '全屏'; bf.onclick = goFullscreen;
+  panel.appendChild(bf);
+  const bs = document.createElement('button'); bs.textContent = '显示 / 隐藏取景区块';
+  bs.onclick = () => setupBox.classList.toggle('dim');
+  panel.appendChild(bs);
+  const bc = document.createElement('button');
+  bc.textContent = '能力自检（在手机上点这个）';
+  bc.onclick = showCaps;
+  panel.appendChild(bc);
+})();
+function syncUI(){
+  for (const c of CTRL){
+    const el = inputs[c.id]; if (!el) continue;
+    if (c.t === 'check') el.checked = !!S[c.id];
+    else if (c.t === 'range' || c.t === 'select') el.value = S[c.id];
+  }
+}
+function goFullscreen(){
+  const el = document.documentElement;
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  try {
+    const r = fn && fn.call(el);
+    if (r && r.then) r.then(() => {
+      if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+    }).catch(() => {});
+  } catch (e) {}
+  wakeLock();
+}
+const toastEl = $('#toast');
+/* 把"能不能跑"从猜测变成目标设备上的读数: 点一下, 列出全部关键能力 */
+function capReport(){
+  const L = [], yn = (v) => (v ? '有' : '无');
+  L.push('视口           ' + window.innerWidth + '×' + window.innerHeight +
+         '   dpr=' + (window.devicePixelRatio || 1));
+  L.push('安全上下文     ' + yn(window.isSecureContext) + '（无则摄像头不可用）');
+  L.push('已渲染帧数     ' + frameNo + '   实测fps ' + fpsShown + ' / 目标 ' + S.fps);
+  L.push('画布           ' + canvas.width + '×' + canvas.height +
+         '   CSS ' + canvas.style.width + ' × ' + canvas.style.height);
+  L.push('');
+  L.push('WebGL2         ' + yn(!!gl));
+  if (gl){
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    L.push('渲染器         ' + (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+                                    : gl.getParameter(gl.RENDERER)));
+    L.push('浮点渲目标     ' + (FLOAT_RT ? '有（RGBA16F，高光/光晕完整）'
+                                        : '无（回退 RGBA8，高光模拟受限）'));
+    L.push('最大纹理尺寸   ' + gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    L.push('中间帧缓冲估算 ' + Math.round(canvas.width * canvas.height *
+           (FLOAT_RT ? 8 : 4) * 1.4 / 1048576) + ' MB');
+  }
+  L.push('');
+  L.push('rVFC 帧回调    ' + yn(!!video.requestVideoFrameCallback));
+  L.push('全屏 API       ' + yn(!!(document.documentElement.requestFullscreen ||
+                                  document.documentElement.webkitRequestFullscreen)) +
+         '（iPhone 上通常为「无」，用「添加到主屏幕」替代）');
+  L.push('方向锁定       ' + yn(!!(screen.orientation && screen.orientation.lock)));
+  L.push('屏幕常亮       ' + yn('wakeLock' in navigator));
+  L.push('');
+  if (stream && stream.getVideoTracks().length){
+    const t = stream.getVideoTracks()[0];
+    const st = t.getSettings ? t.getSettings() : {};
+    const cp = t.getCapabilities ? t.getCapabilities() : {};
+    L.push('相机           ' + (st.width || '?') + '×' + (st.height || '?') +
+           ' @' + (st.frameRate || '?') + 'fps   朝向 ' + (st.facingMode || '?'));
+    for (const k of ['focusMode', 'exposureMode', 'whiteBalanceMode', 'zoom', 'torch',
+                     'iso', 'exposureCompensation', 'exposureTime']){
+      L.push('  ' + (k + '                    ').slice(0, 20) +
+             (cp[k] === undefined ? '不支持' : JSON.stringify(cp[k])));
+    }
+  } else L.push('相机           未开启（先点「开启摄像头」再看这里）');
+  L.push('');
+  const sc = (navigator.mediaDevices && navigator.mediaDevices.getSupportedConstraints)
+    ? navigator.mediaDevices.getSupportedConstraints() : {};
+  L.push('支持的约束项   ' + Object.keys(sc).join(', '));
+  return L.join('\n');
+}
+function showCaps(){
+  $('#capsText').textContent = capReport();
+  $('#caps').classList.add('show');
+}
+$('#capsClose').onclick = () => $('#caps').classList.remove('show');
+$('#capsRefresh').onclick = () => { $('#capsText').textContent = capReport(); };
+
+let toastT = 0;
+function toast(msg){
+  toastEl.textContent = msg; toastEl.classList.add('show');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+/* ============================ 启动 ============================ */
+$('#tab').onclick = () => panel.classList.toggle('open');
+$('#startBtn').onclick = async () => {
+  const btn = $('#startBtn');
+  btn.textContent = '正在开启…';
+  try {
+    await startCamera();
+    $('#overlay').classList.remove('show');
+    setTimeout(calAuto, 700);
+  } catch (e){
+    btn.textContent = '重试';
+    alert('无法开启摄像头：' + (e && e.message ? e.message : e) +
+      '\n\n需要 HTTPS 或 localhost，并授予摄像头权限。');
+  }
+};
+$('#setupBtn').onclick = () => setupBox.classList.remove('dim');
+window.addEventListener('resize', () => { if (running) layout(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { wl = null; }
+  else { wakeLock(); lastDraw = 0; }
+});
+if (!window.isSecureContext) toast('非安全上下文：摄像头不可用');
+
+/* 合成负片: 把"场景"按负片特性写成一张橙调底片, 用于离线验证反相数学 */
+function renderDemo(){
+  const w = 720, h = 480;
+  demoCv = Object.assign(document.createElement('canvas'), { width: w, height: h });
+  const ctx = demoCv.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+    const u = x / (w - 1), v = y / (h - 1);
+    let E = [0.03 + 3.2 * Math.pow(1 - v, 2.2),
+             0.03 + 3.0 * Math.pow(1 - v, 2.0),
+             0.06 + 2.4 * Math.pow(1 - v, 1.7)];
+    if (v > 0.6){                                   // 地面: 暖色暗部
+      const t = (v - 0.6) / 0.4;
+      E = [0.03 + 0.55 * t, 0.025 + 0.34 * t, 0.02 + 0.16 * t];
+    }
+    const dx = (u - 0.72) * w * 0.5, dy = (v - 0.26) * h * 0.55;
+    const sun = Math.exp(-(dx*dx + dy*dy) / (2 * 15 * 15));   // 太阳 → 测高光溢出
+    E = [E[0] + sun * 30, E[1] + sun * 26, E[2] + sun * 9];
+    const o = (y * w + x) * 4;
+    for (let i = 0; i < 3; i++){
+      // 负片: 相对片基的透射率 T = E^(-γ)
+      const lin = Math.min(DEMO_BASE_LIN[i],
+        DEMO_BASE_LIN[i] * Math.pow(Math.max(E[i], 1e-4), -DEMO_GAMMA[i]));
+      d[o + i] = Math.round(255 * Math.min(1, Math.pow(lin, 1 / 2.2)));
+    }
+    d[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+if (DEMO){
+  renderDemo();
+  CAL.black = [0, 0, 0];
+  CAL.base = DEMO_BASE_LIN.slice();
+  CAL.light = DEMO_BASE_LIN.slice();
+  S.autoTrack = 0;
+  if (CHECK){ S.crosstalk = 0; S.autoExp = 0; S.shutter = 0; probe.el.style.display = 'block'; }
+  track.corners = [[0,0],[1,0],[0,1],[1,1]];
+  $('#overlay').classList.remove('show');
+  resizeEditor(); layout();
+  running = true; lastDraw = 0;
+}
+
+requestAnimationFrame(render);
+if (new URLSearchParams(location.search).has('caps')) setTimeout(showCaps, 700);
+</script>
+</body>
+</html>
